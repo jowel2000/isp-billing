@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: isp-billing-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: isp
+      POSTGRES_PASSWORD: isp_dev_password
+      POSTGRES_DB: isp_billing
+    ports:
+      - "5432:5432"
+    volumes:
+      - isp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U isp -d isp_billing"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: isp-billing-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - isp_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  isp_pgdata:
+  isp_redisdata:

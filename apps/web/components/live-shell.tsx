@@ -1,0 +1,246 @@
+'use client';
+
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { useBranding } from '@/lib/branding';
+import { useI18n } from '@/lib/i18n';
+import { useLiveAuth } from '@/lib/live-auth';
+import { BrandMark } from './brand-mark';
+import { Icon, IconName } from './icon';
+import { LanguageSwitcher } from './language-switcher';
+import { ThemeSwitcher } from './theme-switcher';
+
+interface NavItem {
+  href: string;
+  label: string;
+  icon: IconName;
+  soon?: boolean;
+  permission?: string;
+  anyPermissions?: string[];
+}
+
+const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
+  {
+    label: 'MAIN',
+    items: [
+      { href: '/dashboard', label: 'nav.dashboard', icon: 'grid' },
+      {
+        href: '/users?role=admin',
+        label: 'nav.admin',
+        icon: 'shield',
+        permission: 'admins.manage',
+      },
+      {
+        href: '/users?role=staff',
+        label: 'nav.staff',
+        icon: 'users',
+        permission: 'users.manage',
+      },
+      {
+        href: '/mobile-banking',
+        label: 'nav.mobileBanking',
+        icon: 'wallet',
+        permission: 'settings.payment',
+      },
+      { href: '/clients', label: 'nav.clients', icon: 'users' },
+      { href: '/payments', label: 'nav.payments', icon: 'wallet' },
+      { href: '/invoices', label: 'nav.invoices', icon: 'invoice' },
+      {
+        href: '/recharge-history',
+        label: 'nav.rechargeHistory',
+        icon: 'wallet',
+        permission: 'reports.recharge',
+      },
+      {
+        href: '/payment-inbox',
+        label: 'nav.paymentInbox',
+        icon: 'wallet',
+        permission: 'payments.reconcile',
+      },
+      {
+        href: '/wrong-recharge',
+        label: 'nav.wrongRecharge',
+        icon: 'alert',
+        permission: 'payments.reconcile',
+      },
+      { href: '/packages', label: 'nav.packages', icon: 'package' },
+      { href: '/reports', label: 'nav.reports', icon: 'chart' },
+      {
+        href: '/activity-logs',
+        label: 'nav.activityLogs',
+        icon: 'chart',
+        anyPermissions: ['logs.client_login', 'logs.user_login', 'logs.audit'],
+      },
+      {
+        href: '/branding',
+        label: 'nav.branding',
+        icon: 'image',
+        permission: 'settings.branding',
+      },
+      { href: '/settings', label: 'nav.settings', icon: 'settings' },
+    ],
+  },
+];
+
+const PAGE_TITLES: Record<string, string> = {
+  '/dashboard': 'page.dashboard',
+  '/clients': 'page.clients',
+  '/payments': 'page.payments',
+  '/invoices': 'page.invoices',
+  '/recharge-history': 'page.rechargeHistory',
+  '/payment-inbox': 'page.paymentInbox',
+  '/wrong-recharge': 'page.wrongRecharge',
+  '/packages': 'page.packages',
+  '/reports': 'page.reports',
+  '/users': 'page.users',
+  '/activity-logs': 'page.activityLogs',
+  '/mobile-banking': 'page.mobileBanking',
+  '/branding': 'page.branding',
+  '/settings': 'page.settings',
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  super_admin: 'Super Admin',
+  admin: 'Admin',
+  staff: 'Staff',
+  client: 'Client',
+};
+
+export function LiveShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const branding = useBranding();
+  const { t } = useI18n();
+  const { user, logout } = useLiveAuth();
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
+
+  if (!user) return null;
+
+  const title = t(PAGE_TITLES[pathname] || 'page.dashboard');
+  const roleLabel = ROLE_LABELS[user.role] || user.role;
+  const initials = user.name
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join('');
+
+  const navItems = NAV_GROUPS.flatMap((group) => group.items).filter(
+    (item) =>
+      (!item.permission || user.permissions.includes(item.permission)) &&
+      (!item.anyPermissions ||
+        item.anyPermissions.some((permission) =>
+          user.permissions.includes(permission),
+        )),
+  );
+
+  return (
+    <div className="demo-root">
+      <div className={`demo-overlay ${open ? 'show' : ''}`} onClick={() => setOpen(false)} />
+
+      <aside className={`demo-sidebar ${open ? 'open' : ''}`}>
+        <div className="demo-brand">
+          <BrandMark branding={branding} />
+          <div>
+            <strong>{branding.name}</strong>
+            <small>{t('app.ispBillingPanel')}</small>
+          </div>
+          <button className="demo-sidebar-close" onClick={() => setOpen(false)} aria-label="Close menu">
+            <Icon name="close" size={18} />
+          </button>
+        </div>
+
+        <nav className="demo-nav">
+          {navItems.map((item) => {
+            const active = pathname === item.href;
+            const content = (
+              <>
+                <span className="demo-nav-icon">
+                  <Icon name={item.icon} size={18} />
+                </span>
+                <span>{t(item.label)}</span>
+                {item.soon ? <span className="soon">soon</span> : null}
+              </>
+            );
+
+            return item.soon ? (
+              <span
+                key={item.href}
+                className="demo-nav-item"
+                style={{ opacity: 0.55, cursor: 'not-allowed' }}
+                title={`${item.label} — next step`}
+              >
+                {content}
+              </span>
+            ) : (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`demo-nav-item ${active ? 'active' : ''}`}
+              >
+                {content}
+              </Link>
+            );
+          })}
+        </nav>
+
+        <div className="demo-side-card">
+          <div className="demo-side-card-top">
+            <span className="demo-live-dot" />
+            <strong>Live mode</strong>
+          </div>
+          <p>আসল API ও ডেটাবেসে যুক্ত। SQLite dev · PostgreSQL-ready।</p>
+          <button className="demo-side-link" onClick={() => logout()} type="button">
+            {t('app.logout')} <Icon name="logout" size={13} />
+          </button>
+        </div>
+      </aside>
+
+      <div className="demo-main">
+        <header className="demo-topbar">
+          <div className="demo-topbar-left">
+            <button className="demo-menu-btn" onClick={() => setOpen(true)} aria-label="Open menu">
+              <Icon name="menu" size={20} />
+            </button>
+            <div>
+              <p className="demo-topbar-eyebrow">{branding.name}</p>
+              <h1>{title}</h1>
+            </div>
+          </div>
+
+          <div className="demo-search">
+            <Icon name="search" size={16} />
+            <input placeholder="ক্লায়েন্ট, ইনভয়েস বা Trx ID খুঁজুন…" />
+            <kbd>⌘K</kbd>
+          </div>
+
+          <div className="demo-top-actions">
+            <ThemeSwitcher />
+            <LanguageSwitcher />
+            <span className="live-chip">{t('app.liveData')}</span>
+            <button className="demo-icon-btn" aria-label="Notifications">
+              <Icon name="bell" size={18} />
+              <span className="demo-notify-dot" />
+            </button>
+            <div className="demo-user">
+              <span className="demo-avatar">{initials || 'U'}</span>
+              <div>
+                <strong>{user.name}</strong>
+                <small>{roleLabel}</small>
+              </div>
+            </div>
+            <button className="demo-icon-btn" onClick={() => logout()} title="Logout">
+              <Icon name="logout" size={17} />
+            </button>
+          </div>
+        </header>
+
+        <main className="demo-content">{children}</main>
+      </div>
+    </div>
+  );
+}

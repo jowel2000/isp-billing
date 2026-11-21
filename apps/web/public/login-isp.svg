@@ -1,0 +1,216 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 880" role="img" aria-label="ISP network illustration">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a1120"/>
+      <stop offset="0.55" stop-color="#0d1830"/>
+      <stop offset="1" stop-color="#111f3a"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#f9ae27" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#f9ae27" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tower" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22314f"/>
+      <stop offset="1" stop-color="#101a2e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffc247"/>
+      <stop offset="1" stop-color="#f97316"/>
+    </linearGradient>
+    <linearGradient id="fiber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f9ae27"/>
+      <stop offset="0.55" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="building" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c2b47"/>
+      <stop offset="1" stop-color="#0e1729"/>
+    </linearGradient>
+    <filter id="soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <filter id="lineGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.4" cy="1.4" r="1.1" fill="#7da2d6" opacity="0.14"/>
+    </pattern>
+    <pattern id="windows" width="18" height="22" patternUnits="userSpaceOnUse">
+      <rect x="3" y="5" width="7" height="9" rx="1.6" fill="#7dd3fc" opacity="0.55"/>
+      <rect x="12" y="5" width="3" height="9" rx="1.4" fill="#f9ae27" opacity="0.35"/>
+    </pattern>
+  </defs>
+
+  <rect width="720" height="880" fill="url(#bg)"/>
+  <rect width="720" height="880" fill="url(#dots)"/>
+  <ellipse cx="360" cy="330" rx="300" ry="260" fill="url(#glowA)"/>
+  <ellipse cx="560" cy="700" rx="260" ry="210" fill="url(#glowB)"/>
+
+  <!-- signal rings -->
+  <g fill="none" stroke="#f9ae27" opacity="0.22">
+    <circle cx="360" cy="332" r="150" stroke-dasharray="5 12"/>
+    <circle cx="360" cy="332" r="205" stroke-dasharray="3 15" opacity="0.65"/>
+    <circle cx="360" cy="332" r="262" stroke-dasharray="2 18" opacity="0.4"/>
+  </g>
+
+  <!-- orbital satellites -->
+  <g>
+    <circle cx="360" cy="182" r="7" fill="#ffc247"/>
+    <circle cx="360" cy="182" r="16" fill="#ffc247" opacity="0.15"/>
+    <circle cx="515" cy="332" r="5" fill="#38bdf8"/>
+    <circle cx="515" cy="332" r="13" fill="#38bdf8" opacity="0.15"/>
+    <circle cx="224" cy="430" r="5" fill="#22d3ee"/>
+    <circle cx="224" cy="430" r="13" fill="#22d3ee" opacity="0.15"/>
+  </g>
+
+  <!-- cables -->
+  <g fill="none" stroke-linecap="round" filter="url(#lineGlow)">
+    <path d="M332 500 C300 560 250 590 196 620" stroke="url(#fiber)" stroke-width="4"/>
+    <path d="M388 500 C430 560 488 586 540 612" stroke="url(#fiber)" stroke-width="4"/>
+    <path d="M360 512 C360 580 352 640 344 700" stroke="url(#fiber)" stroke-width="3.5" opacity="0.9"/>
+    <path d="M318 492 C250 480 206 470 154 448" stroke="#f9ae27" stroke-width="3" opacity="0.55"/>
+    <path d="M402 492 C474 474 524 462 584 438" stroke="#38bdf8" stroke-width="3" opacity="0.55"/>
+  </g>
+
+  <!-- left building -->
+  <g>
+    <rect x="58" y="612" width="154" height="196" rx="10" fill="url(#building)" stroke="#2a3d60" stroke-width="1.5"/>
+    <rect x="72" y="628" width="126" height="150" rx="5" fill="url(#windows)" opacity="0.85"/>
+    <rect x="72" y="790" width="126" height="18" rx="4" fill="#0a1220"/>
+    <rect x="58" y="608" width="154" height="10" rx="5" fill="#f9ae27" opacity="0.8"/>
+    <circle cx="196" cy="622" r="5" fill="#ffc247"/>
+  </g>
+
+  <!-- right building -->
+  <g>
+    <rect x="512" y="632" width="150" height="176" rx="10" fill="url(#building)" stroke="#2a3d60" stroke-width="1.5"/>
+    <rect x="526" y="648" width="122" height="132" rx="5" fill="url(#windows)" opacity="0.75"/>
+    <rect x="512" y="628" width="150" height="10" rx="5" fill="#38bdf8" opacity="0.8"/>
+    <circle cx="520" cy="642" r="5" fill="#38bdf8"/>
+  </g>
+
+  <!-- small houses -->
+  <g>
+    <path d="M262 758 L316 758 L316 812 L262 812 Z" fill="#13203a" stroke="#2a3d60"/>
+    <path d="M254 760 L289 730 L324 760 Z" fill="#1c2b47" stroke="#2a3d60"/>
+    <rect x="276" y="776" width="14" height="14" rx="2" fill="#f9ae27" opacity="0.75"/>
+    <path d="M420 770 L468 770 L468 816 L420 816 Z" fill="#13203a" stroke="#2a3d60"/>
+    <path d="M412 772 L444 744 L476 772 Z" fill="#1c2b47" stroke="#2a3d60"/>
+    <rect x="434" y="786" width="13" height="13" rx="2" fill="#38bdf8" opacity="0.7"/>
+  </g>
+
+  <!-- central tower -->
+  <g>
+    <ellipse cx="360" cy="528" rx="118" ry="22" fill="#08101e" opacity="0.75"/>
+    <rect x="300" y="318" width="120" height="196" rx="22" fill="url(#tower)" stroke="#334a73" stroke-width="2"/>
+    <rect x="314" y="336" width="92" height="52" rx="10" fill="#0a1424" stroke="#2a3d60"/>
+    <g fill="#f9ae27">
+      <circle cx="328" cy="352" r="3.2"/>
+      <circle cx="341" cy="352" r="3.2" opacity="0.75"/>
+      <circle cx="354" cy="352" r="3.2" opacity="0.5"/>
+    </g>
+    <g stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round" opacity="0.8">
+      <path d="M328 368 h38"/>
+      <path d="M328 376 h56"/>
+    </g>
+    <rect x="314" y="402" width="92" height="10" rx="5" fill="#0a1424" stroke="#2a3d60"/>
+    <rect x="314" y="422" width="92" height="10" rx="5" fill="#0a1424" stroke="#2a3d60"/>
+    <rect x="314" y="442" width="92" height="10" rx="5" fill="#0a1424" stroke="#2a3d60"/>
+    <g fill="#22d3ee">
+      <circle cx="322" cy="407" r="2.6"/>
+      <circle cx="322" cy="427" r="2.6" fill="#f9ae27"/>
+      <circle cx="322" cy="447" r="2.6"/>
+    </g>
+    <rect x="326" y="474" width="68" height="18" rx="9" fill="url(#accent)" opacity="0.9"/>
+    <rect x="340" y="492" width="40" height="12" rx="6" fill="#0a1424"/>
+  </g>
+
+  <!-- antenna + wifi -->
+  <g>
+    <path d="M360 318 V282" stroke="#f9ae27" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="360" cy="276" r="7" fill="#ffc247"/>
+    <circle cx="360" cy="276" r="18" fill="#ffc247" opacity="0.14"/>
+    <g fill="none" stroke="#f9ae27" stroke-width="3" stroke-linecap="round" opacity="0.85">
+      <path d="M338 254 a30 30 0 0 1 44 0"/>
+      <path d="M326 240 a48 48 0 0 1 68 0"/>
+      <path d="M314 226 a66 66 0 0 1 92 0" opacity="0.55"/>
+    </g>
+  </g>
+
+  <!-- floating dashboard card: bars -->
+  <g>
+    <rect x="64" y="210" width="188" height="122" rx="16" fill="#101c33" stroke="#2a3d60" opacity="0.96"/>
+    <rect x="80" y="228" width="64" height="7" rx="3.5" fill="#7da2d6" opacity="0.5"/>
+    <g fill="#f9ae27">
+      <rect x="80" y="292" width="14" height="24" rx="4" opacity="0.55"/>
+      <rect x="102" y="278" width="14" height="38" rx="4" opacity="0.7"/>
+      <rect x="124" y="264" width="14" height="52" rx="4" opacity="0.85"/>
+      <rect x="146" y="284" width="14" height="32" rx="4" opacity="0.6"/>
+      <rect x="168" y="252" width="14" height="64" rx="4"/>
+    </g>
+    <path d="M196 234 l12 0 l0 12" fill="none" stroke="#38bdf8" stroke-width="2" opacity="0.7"/>
+  </g>
+
+  <!-- floating dashboard card: line chart -->
+  <g>
+    <rect x="474" y="196" width="196" height="138" rx="16" fill="#101c33" stroke="#2a3d60" opacity="0.96"/>
+    <rect x="490" y="214" width="54" height="7" rx="3.5" fill="#7da2d6" opacity="0.5"/>
+    <path d="M490 300 L516 280 L540 290 L566 254 L592 266 L618 238 L646 250" fill="none" stroke="#38bdf8" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M490 300 L516 280 L540 290 L566 254 L592 266 L618 238 L646 250 L646 312 L490 312 Z" fill="#38bdf8" opacity="0.08"/>
+    <circle cx="618" cy="238" r="5" fill="#38bdf8"/>
+    <circle cx="618" cy="238" r="11" fill="#38bdf8" opacity="0.18"/>
+  </g>
+
+  <!-- floating card: donut -->
+  <g>
+    <rect x="446" y="666" width="168" height="112" rx="16" fill="#101c33" stroke="#2a3d60" opacity="0.96"/>
+    <circle cx="492" cy="722" r="30" fill="none" stroke="#1c2b47" stroke-width="10"/>
+    <circle cx="492" cy="722" r="30" fill="none" stroke="url(#accent)" stroke-width="10" stroke-dasharray="122 66" stroke-linecap="round" transform="rotate(-90 492 722)"/>
+    <g fill="#7da2d6" opacity="0.6">
+      <rect x="542" y="702" width="52" height="7" rx="3.5"/>
+      <rect x="542" y="720" width="40" height="7" rx="3.5" opacity="0.7"/>
+      <rect x="542" y="738" width="46" height="7" rx="3.5" opacity="0.5"/>
+    </g>
+  </g>
+
+  <!-- technicians -->
+  <g>
+    <g>
+      <circle cx="236" cy="690" r="10" fill="#f4c48a"/>
+      <path d="M226 684 a10 10 0 0 1 20 0 Z" fill="#f9ae27"/>
+      <rect x="224" y="698" width="24" height="34" rx="9" fill="#1f3356"/>
+      <rect x="218" y="704" width="8" height="22" rx="4" fill="#1f3356"/>
+      <rect x="246" y="704" width="8" height="22" rx="4" fill="#1f3356"/>
+      <rect x="226" y="730" width="8" height="24" rx="4" fill="#0f1b30"/>
+      <rect x="238" y="730" width="8" height="24" rx="4" fill="#0f1b30"/>
+    </g>
+    <g opacity="0.9">
+      <circle cx="472" cy="700" r="9" fill="#f4c48a"/>
+      <path d="M463 695 a9 9 0 0 1 18 0 Z" fill="#38bdf8"/>
+      <rect x="461" y="707" width="22" height="30" rx="8" fill="#1f3356"/>
+      <rect x="482" y="712" width="7" height="20" rx="3.5" fill="#1f3356"/>
+      <rect x="455" y="712" width="7" height="20" rx="3.5" fill="#1f3356"/>
+      <rect x="463" y="735" width="7" height="21" rx="3.5" fill="#0f1b30"/>
+      <rect x="474" y="735" width="7" height="21" rx="3.5" fill="#0f1b30"/>
+    </g>
+  </g>
+
+  <!-- network nodes -->
+  <g fill="#22d3ee">
+    <circle cx="154" cy="448" r="4"/>
+    <circle cx="584" cy="438" r="4" fill="#f9ae27"/>
+    <circle cx="196" cy="620" r="4" fill="#38bdf8"/>
+    <circle cx="540" cy="612" r="4" fill="#38bdf8"/>
+  </g>
+
+  <!-- bottom fade -->
+  <rect x="0" y="812" width="720" height="68" fill="url(#bg)" opacity="0.55"/>
+</svg>

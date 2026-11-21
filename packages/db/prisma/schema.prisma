@@ -1,0 +1,661 @@
+// Smart ISP Billing — Phase 0 schema
+// Dev: SQLite. Production: switch provider to "postgresql" and update DATABASE_URL.
+// Money is stored as integer paisa (BigInt).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id     String @id @default(cuid())
+  name   String
+  code   String @unique
+  status String @default("active")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users               User[]
+  roles               Role[]
+  areas               Area[]
+  packages            Package[]
+  clients             Client[]
+  invoices            Invoice[]
+  payments            Payment[]
+  ledgerAccounts      LedgerAccount[]
+  ledgerEntries       LedgerEntry[]
+  paymentGateways     PaymentGateway[]
+  smsGateways         SmsGateway[]
+  taxSetting          TaxSetting?
+  settings            Setting[]
+  upstreamSessions    UpstreamSession[]
+  upstreamEntityMaps  UpstreamEntityMap[]
+  automationJobs      AutomationJob[]
+  rechargeJobs        RechargeJob[]
+  smsInbound          SmsInbound[]
+  loginHistory        LoginHistory[]
+  auditLogs           AuditLog[]
+  otpRequests         OtpRequest[]
+  reconciliationIssues ReconciliationIssue[]
+}
+
+model User {
+  id           String  @id @default(cuid())
+  tenantId     String
+  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name         String
+  mobile       String
+  loginId      String?
+  email        String?
+  passwordHash String
+  roleId       String
+  role         Role    @relation(fields: [roleId], references: [id])
+
+  status           String  @default("active")
+  deletedAt        DateTime?
+  twoFactorEnabled Boolean @default(false)
+  lastLoginAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  areaScopes         UserAreaScope[]
+  permissionOverrides UserPermissionOverride[]
+  refreshTokens      RefreshToken[]
+  auditLogs          AuditLog[]  @relation("AuditActor")
+  otpResponses       OtpRequest[] @relation("OtpResponder")
+
+  @@unique([tenantId, mobile])
+  @@unique([tenantId, loginId])
+  @@index([tenantId, roleId])
+}
+
+model Role {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name     String
+  level    Int     @default(100)
+  isSystem Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users           User[]
+  rolePermissions RolePermission[]
+
+  @@unique([tenantId, name])
+}
+
+model Permission {
+  key         String @id
+  description String?
+
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  roleId        String
+  permissionKey String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionKey], references: [key], onDelete: Cascade)
+
+  @@id([roleId, permissionKey])
+}
+
+model UserPermissionOverride {
+  userId        String
+  permissionKey String
+  effect        String // allow | deny
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionKey])
+}
+
+model Area {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  upstreamId String?
+  name       String
+  district   String?
+  thana      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clients    Client[]
+  userScopes UserAreaScope[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, upstreamId])
+}
+
+model UserAreaScope {
+  userId String
+  areaId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  area Area @relation(fields: [areaId], references: [id], onDelete: Cascade)
+
+  @@id([userId, areaId])
+}
+
+model Package {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  upstreamId    String?
+  name          String
+  speedMbps     Int?
+  upstreamPrice BigInt @default(0)
+  localPrice    BigInt @default(0)
+  cbp           BigInt @default(0)
+  status        String @default("active")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, upstreamId])
+}
+
+model Client {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  publicId  String  @unique
+  paymentCode String?
+  upstreamId String?
+  name      String
+  mobile    String
+  altMobile String?
+  areaId    String?
+  area      Area?   @relation(fields: [areaId], references: [id])
+  address   String?
+
+  nidNumberEnc      String?
+  nidPhotoPath      String?
+  photoPath         String?
+  pppoeUsername     String?
+  pppoePasswordEnc  String?
+  ipAddress         String?
+
+  status       String  @default("active")
+  billingType  String  @default("prepaid")
+  activatedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  billingProfile ClientBillingProfile?
+  subscriptions  Subscription[]
+  invoices       Invoice[]
+  payments       Payment[]
+  rechargeJobs   RechargeJob[]
+  ledgerEntries  LedgerEntry[]
+  loginHistory   LoginHistory[]
+
+  @@unique([tenantId, paymentCode])
+  @@index([tenantId, mobile])
+  @@index([tenantId, areaId])
+  @@index([tenantId, upstreamId])
+  @@index([tenantId, status])
+}
+
+model ClientBillingProfile {
+  id       String @id @default(cuid())
+  clientId String @unique
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  billingType           String  @default("prepaid")
+  monthlyAmountOverride BigInt?
+  discount              BigInt @default(0)
+  dueDay                Int     @default(1)
+  graceDays             Int     @default(3)
+  autoRenew             Boolean @default(true)
+  autoRecharge          Boolean @default(false)
+  nextInvoiceDate       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Subscription {
+  id       String @id @default(cuid())
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  packageId String
+  package  Package @relation(fields: [packageId], references: [id])
+
+  startAt          DateTime
+  expireAt         DateTime?
+  status           String @default("active")
+  autoRenew        Boolean @default(true)
+  upstreamSyncedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId, status])
+  @@index([expireAt])
+}
+
+model Invoice {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  number String @unique
+
+  periodStart DateTime?
+  periodEnd   DateTime?
+  issueDate   DateTime  @default(now())
+  dueDate     DateTime?
+
+  subtotal  BigInt @default(0)
+  discount  BigInt @default(0)
+  taxRate   Int    @default(0) // basis points: 500 = 5%
+  taxAmount BigInt @default(0)
+  total     BigInt @default(0)
+  paidAmount BigInt @default(0)
+  dueAmount  BigInt @default(0)
+
+  status String @default("unpaid")
+  notes  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items    InvoiceItem[]
+  payments Payment[]
+  rechargeJobs RechargeJob[]
+
+  @@index([tenantId, clientId, status])
+  @@index([tenantId, dueDate])
+}
+
+model InvoiceItem {
+  id        String @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  description String
+  quantity    Int    @default(1)
+  unitPrice   BigInt @default(0)
+  amount      BigInt @default(0)
+  type        String @default("package")
+}
+
+model Payment {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  clientId  String
+  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+
+  method        String  @default("bkash")
+  provider      String  @default("bkash")
+  accountType   String  @default("merchant")
+  receiverNumber String?
+  channel       String  @default("manual")
+  amount        BigInt
+  trxId         String?
+  senderNumber  String?
+  referenceCode String?
+  paidAt        DateTime?
+  status        String  @default("pending")
+
+  gatewayPayload String?
+  verifiedBy     String?
+  verifiedAt     DateTime?
+  rejectReason   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rechargeJobs RechargeJob[]
+  smsEvents    SmsInbound[]
+
+  @@unique([tenantId, trxId])
+  @@index([tenantId, status])
+  @@index([tenantId, clientId])
+}
+
+model LedgerAccount {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  code String
+  name String
+  type String // asset | liability | revenue | expense | equity
+
+  createdAt DateTime @default(now())
+
+  entries LedgerEntry[]
+
+  @@unique([tenantId, code])
+}
+
+model LedgerEntry {
+  id        String @id @default(cuid())
+  tenantId  String
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  accountId String
+  account   LedgerAccount @relation(fields: [accountId], references: [id])
+
+  transactionId String
+  clientId      String?
+  client        Client? @relation(fields: [clientId], references: [id])
+  debit         BigInt @default(0)
+  credit        BigInt @default(0)
+  refType       String?
+  refId         String?
+  description   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, transactionId])
+  @@index([tenantId, accountId])
+  @@index([tenantId, clientId])
+}
+
+model PaymentGateway {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  type           String  @default("bkash")
+  merchantNumber String?
+  label          String?
+  instructions   String?
+  merchantActive Boolean @default(true)
+
+  personalNumber       String?
+  personalLabel        String?
+  personalInstructions String?
+  personalActive       Boolean @default(false)
+
+  credentialsEnc String?
+  isActive       Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, type])
+}
+
+model SmsInbound {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  sender        String?
+  body          String
+  bodyHash      String
+  kind          String  @default("unknown") // payment | otp | unknown
+  provider      String?
+  amountPaisa   BigInt?
+  trxId         String?
+  referenceCode String?
+  senderMobile  String?
+  otpCode       String?
+  status        String  @default("new") // new | verified | pending | unmatched | ignored | error
+  paymentId     String?
+  payment       Payment? @relation(fields: [paymentId], references: [id])
+  error         String?
+  receivedAt    DateTime?
+  createdAt     DateTime @default(now())
+
+  @@unique([tenantId, bodyHash])
+  @@index([tenantId, kind, createdAt])
+  @@index([tenantId, status, createdAt])
+}
+
+model SmsGateway {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  provider       String
+  apiEndpoint    String?
+  credentialsEnc String?
+  senderId       String?
+  isActive       Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, isActive])
+}
+
+model TaxSetting {
+  id       String @id @default(cuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  enabled  Boolean @default(false)
+  rateBps  Int     @default(500) // 500 = 5%
+  inclusive Boolean @default(false)
+  label    String  @default("VAT")
+
+  updatedAt DateTime @updatedAt
+}
+
+model Setting {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  key   String
+  value String
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, key])
+}
+
+model UpstreamSession {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  cookieEnc      String
+  expiresAt      DateTime?
+  status         String  @default("active")
+  lastVerifiedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([tenantId, status])
+}
+
+model UpstreamEntityMap {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  entityType String
+  upstreamId String
+  localId    String
+  rawHash    String?
+  lastSyncedAt DateTime @default(now())
+
+  @@unique([tenantId, entityType, upstreamId])
+}
+
+model AutomationJob {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  type           String
+  payload        String?
+  idempotencyKey String? @unique
+  status         String  @default("pending")
+  attempts       Int     @default(0)
+  lastError      String?
+  scheduledAt    DateTime @default(now())
+  startedAt      DateTime?
+  finishedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, type, status])
+}
+
+model RechargeJob {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  clientId  String
+  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id])
+
+  packageId       String?
+  amount          BigInt
+  durationDays    Int?
+  upstreamCostPaisa BigInt @default(0)
+  status          String  @default("queued")
+  idempotencyKey  String @unique
+  attempts        Int     @default(0)
+  lastError       String?
+  upstreamRef     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, status])
+  @@index([tenantId, paymentId])
+}
+
+model LoginHistory {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  clientId  String
+  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  upstreamId String?
+
+  ip       String?
+  loginAt  DateTime
+  logoutAt DateTime?
+
+  @@index([tenantId, clientId, loginAt])
+}
+
+model AuditLog {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  actorId String?
+  actor   User? @relation("AuditActor", fields: [actorId], references: [id])
+
+  action     String
+  entityType String
+  entityId   String?
+  before     String?
+  after      String?
+  ip         String?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, entityType, entityId])
+}
+
+model RefreshToken {
+  id        String @id @default(cuid())
+  userId    String
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  ip        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+model OtpRequest {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  status      String @default("pending")
+  requestedAt DateTime @default(now())
+  respondedAt DateTime?
+  expiresAt   DateTime?
+  context     String?
+  respondedBy String?
+  responder   User? @relation("OtpResponder", fields: [respondedBy], references: [id])
+
+  @@index([tenantId, status])
+}
+
+model UserLoginLog {
+  id       String @id @default(cuid())
+  tenantId String?
+  userId   String?
+  clientId String?
+  loginId  String
+  role     String?
+  ip       String?
+  userAgent String?
+  success  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, userId])
+  @@index([tenantId, clientId])
+}
+
+model ReconciliationIssue {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  type     String
+  refType  String?
+  refId    String?
+  status   String @default("open")
+  details  String?
+  assignedTo String?
+
+  createdAt DateTime @default(now())
+  resolvedAt DateTime?
+
+  @@index([tenantId, status])
+}
