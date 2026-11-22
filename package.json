@@ -17,6 +17,7 @@
     "db:push": "npm run db:push -w @isp/db",
     "db:seed": "npm run db:seed -w @isp/db",
     "db:backfill": "npm run db:backfill -w @isp/db",
+    "db:backfill-users": "npm run db:backfill-users -w @isp/db",
     "db:studio": "npm run studio -w @isp/db"
   },
   "devDependencies": {
