@@ -26,6 +26,7 @@ import {
   getPayments,
   getProfitReport,
   statusTone,
+  syncUpstream,
   verifyPayment,
 } from '@/lib/live-api';
 
@@ -205,6 +206,29 @@ export default function LiveDashboardPage() {
     }
   }
 
+  // Refresh button: reloads local data AND triggers an upstream login + scrape.
+  const canSyncUpstream = user?.permissions.includes('upstream.manage') ?? false;
+  async function onRefresh() {
+    showToast(canSyncUpstream ? 'Upstream sync হচ্ছে…' : 'রিফ্রেশ হচ্ছে…');
+    await load();
+    if (!canSyncUpstream) return;
+    try {
+      const result = await syncUpstream();
+      if (result.status === 'otp_required') {
+        showToast('লগইন হয়েছে — ফোনের OTP এলে ডেটা অটো চলে আসবে।');
+      } else if (result.status === 'completed') {
+        showToast(
+          `Sync সম্পন্ন — Packages ${result.packages.created} নতুন/${result.packages.updated} আপডেট · Clients ${result.clients.created} নতুন/${result.clients.updated} আপডেট`,
+        );
+      } else {
+        showToast(`Sync সমস্যা: ${result.errors.join('; ') || 'unknown'}`, true);
+      }
+      await load();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Upstream sync ব্যর্থ', true);
+    }
+  }
+
   const topDue = (data?.due?.top ?? []).slice(0, 4);
   const maxDue = Math.max(...topDue.map((item) => Number(item.dueAmount)), 1);
 
@@ -225,7 +249,7 @@ export default function LiveDashboardPage() {
           </p>
         </div>
         <div className="demo-actions">
-          <button className="demo-btn ghost" type="button" onClick={load}>
+          <button className="demo-btn ghost" type="button" onClick={onRefresh}>
             <Icon name="trend-up" size={15} />
             {t('dash.refresh')}
           </button>

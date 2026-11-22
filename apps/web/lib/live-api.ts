@@ -503,6 +503,22 @@ export function matchSmsPayment(id: string, clientId: string) {
   });
 }
 
+export interface UpstreamSyncResult {
+  status: 'completed' | 'otp_required' | 'failed';
+  packages: { fetched: number; created: number; updated: number };
+  areas: { fetched: number; created: number; updated: number };
+  clients: { fetched: number; created: number; updated: number };
+  errors: string[];
+  note?: string;
+}
+
+export function syncUpstream() {
+  return liveFetch<UpstreamSyncResult>('/upstream/sync', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 export function getUsers(role?: string, archived = false) {
   const params = new URLSearchParams();
   if (role) params.set('role', role);

@@ -539,7 +539,8 @@ export class UpstreamSyncService implements OnModuleInit {
     if (this.autoTimer) return;
 
     const rawInterval = Number(this.config.get<string>('UPSTREAM_AUTO_SYNC_INTERVAL_MINUTES'));
-    const intervalMinutes = Number.isFinite(rawInterval) && rawInterval >= 1 ? rawInterval : 30;
+    // Default: 4 times a day (every 6 hours). Override with the env var.
+    const intervalMinutes = Number.isFinite(rawInterval) && rawInterval >= 1 ? rawInterval : 360;
 
     this.logger.log(`Upstream auto sync enabled — every ${intervalMinutes} minute(s)`);
 
