@@ -437,6 +437,20 @@ model SmsInbound {
   @@index([tenantId, status, createdAt])
 }
 
+model WebhookAttempt {
+  id          String   @id @default(cuid())
+  ip          String?
+  secretHash  String?
+  bodyHash    String?
+  bodySnippet String?
+  statusCode  Int      @default(0)
+  success     Boolean  @default(false)
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 model SmsGateway {
   id       String @id @default(cuid())
   tenantId String

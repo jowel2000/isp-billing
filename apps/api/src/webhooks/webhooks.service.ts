@@ -34,6 +34,25 @@ export class WebhooksService {
     }
   }
 
+  /**
+   * Logs every webhook attempt — successful and failed — so the phone → server
+   * link can be diagnosed. The secret itself is never stored; only its
+   * SHA-256 hash (to tell "wrong secret" from "no secret").
+   */
+  async logAttempt(input: {
+    ip?: string | null;
+    secretHash?: string | null;
+    bodyHash?: string | null;
+    bodySnippet?: string | null;
+    statusCode: number;
+    success: boolean;
+    reason?: string | null;
+  }) {
+    await this.prisma.webhookAttempt
+      .create({ data: input })
+      .catch(() => undefined);
+  }
+
   async ingest(dto: SmsWebhookDto) {
     // Single-tenant deployment. A device-token mapping can select the tenant later.
     const tenant = await this.prisma.tenant.findFirst({ orderBy: { createdAt: 'asc' } });
