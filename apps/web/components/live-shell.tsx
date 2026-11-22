@@ -191,9 +191,9 @@ export function LiveShell({ children }: { children: React.ReactNode }) {
         <div className="demo-side-card">
           <div className="demo-side-card-top">
             <span className="demo-live-dot" />
-            <strong>Live mode</strong>
+            <strong>{t('app.liveMode')}</strong>
           </div>
-          <p>আসল API ও ডেটাবেসে যুক্ত। SQLite dev · PostgreSQL-ready।</p>
+          <p>{t('app.liveNote')}</p>
           <button className="demo-side-link" onClick={() => logout()} type="button">
             {t('app.logout')} <Icon name="logout" size={13} />
           </button>

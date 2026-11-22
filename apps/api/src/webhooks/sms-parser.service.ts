@@ -8,6 +8,7 @@ export interface ParsedSms {
   referenceCode: string | null;
   senderMobile: string | null;
   otpCode: string | null;
+  blocked?: string;
 }
 
 const BANGLA_DIGITS: Record<string, string> = {
@@ -35,6 +36,17 @@ function firstMatch(source: string, patterns: RegExp[]): string | null {
   return null;
 }
 
+/**
+ * Triangle sends its OTP from 09612770444 (user-confirmed). The number may
+ * arrive with or without the country prefix.
+ */
+const TRIANGLE_SENDER_TAIL = '9612770444';
+
+function isTriangleSender(sender: string): boolean {
+  const digits = sender.replace(/\D/g, '');
+  return digits === TRIANGLE_SENDER_TAIL || digits.endsWith(TRIANGLE_SENDER_TAIL);
+}
+
 @Injectable()
 export class SmsParserService {
   parse(rawBody: string, rawSender: string | null | undefined): ParsedSms {
@@ -42,8 +54,25 @@ export class SmsParserService {
     const sender = normalize(rawSender ?? '');
     const source = `${sender} ${body}`;
 
+    // Block rule: messages that look like a payment marker ("pmt#123456" or
+    // "pmt 123456") are never processed — not as OTP, not as payment.
+    if (/\bpmt\s*#?\s*\d{4,8}\b/i.test(body) || /\bpmt\b/i.test(body)) {
+      return {
+        kind: 'unknown',
+        provider: null,
+        amountPaisa: null,
+        trxId: null,
+        referenceCode: null,
+        senderMobile: null,
+        otpCode: null,
+        blocked: 'pmt-marker',
+      };
+    }
+
     const otpCode = firstMatch(body, [/\b(\d{6})\b/]);
-    const looksLikeOtp = /(otp|verification code|কোড|ওটিপি|triangle)/i.test(source);
+    const looksLikeOtp =
+      isTriangleSender(sender) ||
+      /(otp|verification code|কোড|ওটিপি|triangle)/i.test(source);
     if (looksLikeOtp && otpCode) {
       return {
         kind: 'otp',
@@ -53,6 +82,20 @@ export class SmsParserService {
         referenceCode: null,
         senderMobile: null,
         otpCode,
+      };
+    }
+
+    // Safety: the Triangle number is OTP-only. Even if a "payment received"
+    // style message ever arrives from it, it must NEVER be treated as a payment.
+    if (isTriangleSender(sender)) {
+      return {
+        kind: 'unknown',
+        provider: 'triangle',
+        amountPaisa: null,
+        trxId: null,
+        referenceCode: null,
+        senderMobile: null,
+        otpCode: null,
       };
     }
 

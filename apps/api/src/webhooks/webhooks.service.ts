@@ -114,6 +114,19 @@ export class WebhooksService {
       throw error;
     }
 
+    if (parsed.blocked) {
+      await this.prisma.smsInbound.update({
+        where: { id: record.id },
+        data: { status: 'ignored', error: `Blocked: ${parsed.blocked}` },
+      });
+      return {
+        accepted: true,
+        ignored: true,
+        reason: parsed.blocked,
+        smsId: record.id,
+      };
+    }
+
     if (parsed.kind === 'otp' && parsed.otpCode) {
       // Keep it in memory for the in-process worker AND persist an encrypted,
       // short-lived copy in the DB so it survives restarts.

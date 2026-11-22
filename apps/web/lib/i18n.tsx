@@ -54,6 +54,11 @@ const dictionary: Record<string, { bn: string; en: string }> = {
   'common.search': { bn: 'খুঁজুন', en: 'Search' },
   'app.liveData': { bn: 'লাইভ ডেটা', en: 'LIVE DATA' },
   'app.ispBillingPanel': { bn: 'আইএসপি বিলিং প্যানেল', en: 'ISP Billing Panel' },
+  'app.liveMode': { bn: 'লাইভ মোড', en: 'Live mode' },
+  'app.liveNote': {
+    bn: 'আসল API ও ডেটাবেসে যুক্ত। SQLite dev · PostgreSQL-ready।',
+    en: 'Connected to the real API and database.',
+  },
   'app.logout': { bn: 'লগআউট', en: 'Logout' },
   'auth.signIn': { bn: 'লগইন', en: 'Login' },
   'auth.signInHint': {
@@ -157,6 +162,39 @@ const dictionary: Record<string, { bn: string; en: string }> = {
   'dash.method': { bn: 'মেথড', en: 'Method' },
   'dash.amount': { bn: 'পরিমাণ', en: 'Amount' },
   'dash.status': { bn: 'স্ট্যাটাস', en: 'Status' },
+  'users.accessControl': {
+    bn: 'Super Admin → Admin → Staff → Client অ্যাক্সেস কন্ট্রোল',
+    en: 'Super Admin → Admin → Staff → Client access control',
+  },
+  'users.allRoles': { bn: 'সব রোল মিলিয়ে', en: 'All roles combined' },
+  'users.allUsers': { bn: 'ইউজার ও পারমিশন', en: 'Users & Permissions' },
+  'users.addUser': { bn: 'নতুন ইউজার', en: 'Add User' },
+  'users.allAreas': { bn: 'সব এরিয়া', en: 'All areas' },
+  'users.listHint': {
+    bn: 'User ID / ফোন নম্বর দিয়ে খুঁজুন · Admin শুধু নিজের চেয়ে নিচের রোল ম্যানেজ করতে পারবে',
+    en: 'Search by User ID or phone · Admins can only manage lower roles',
+  },
+  'users.searchPlaceholder': {
+    bn: 'User ID / ফোন নম্বর খুঁজুন…',
+    en: 'Search by User ID or phone…',
+  },
+  'users.loading': { bn: 'ইউজার লোড হচ্ছে…', en: 'Loading users…' },
+  'users.none': { bn: 'কোনো ইউজার পাওয়া যায়নি', en: 'No users found' },
+  'users.noneArchived': { bn: 'কোনো archived ইউজার নেই', en: 'No archived users' },
+  'users.archivedHint': {
+    bn: 'শুধু Super Admin এখানে দেখতে ও restore করতে পারবে',
+    en: 'Only the Super Admin can view and restore these users',
+  },
+  'users.rules': {
+    bn: 'প্রতিটি ইউজারের একটি unique User ID অটোমেটিক তৈরি হয়। Archive করলে record মুছে যায় না — শুধু Super Admin Archived তালিকায় দেখতে পাবে। Admin নিজের কাছে নেই এমন permission দিতে পারবে না।',
+    en: 'Every user receives a unique User ID automatically. Archiving never deletes the record — only the Super Admin can see the Archived list. Admins cannot grant permissions they do not have.',
+  },
+  'users.roleAuto': {
+    bn: 'Role অটোমেটিক সেট হবে: {role} · User ID অটোমেটিক তৈরি হবে',
+    en: 'Role will be set automatically: {role} · User ID is generated automatically',
+  },
+  'users.archivedTitle': { bn: 'Archived Users', en: 'Archived Users' },
+  'users.activeUsers': { bn: 'Active Users', en: 'Active Users' },
 };
 
 interface I18nState {

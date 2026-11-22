@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { Icon } from '@/components/icon';
+import { useI18n } from '@/lib/i18n';
 import { useLiveAuth } from '@/lib/live-auth';
 import type { ManagedRole, ManagedUser, PermissionOption } from '@/lib/live-api';
 import {
@@ -53,6 +54,7 @@ function effectivePermissions(user: ManagedUser): Set<string> {
 
 export default function LiveUsersPage() {
   const { user: actor } = useLiveAuth();
+  const { t } = useI18n();
   const isSuperAdmin = actor?.role === 'super_admin';
 
   const [users, setUsers] = useState<ManagedUser[]>([]);
@@ -358,16 +360,14 @@ export default function LiveUsersPage() {
         <div>
           <h2>
             {showArchived
-              ? 'Archived Users'
+              ? t('users.archivedTitle')
               : roleFilter === 'admin'
                 ? 'Admin Management'
                 : roleFilter === 'staff'
                   ? 'Staff Management'
-                  : 'ইউজার ও পারমিশন'}
+                  : t('users.allUsers')}
           </h2>
-          <p className="demo-page-sub">
-            Super Admin → Admin → Staff → Client অ্যাক্সেস কন্ট্রোল
-          </p>
+          <p className="demo-page-sub">{t('users.accessControl')}</p>
         </div>
         <div className="demo-actions">
           <button
@@ -385,13 +385,13 @@ export default function LiveUsersPage() {
               onClick={() => setShowArchived((value) => !value)}
             >
               <Icon name="shield" size={15} />
-              {showArchived ? 'Active Users' : 'Archived'}
+              {showArchived ? t('users.activeUsers') : 'Archived'}
             </button>
           ) : null}
           {!showArchived ? (
             <button className="demo-btn primary" type="button" onClick={() => setAddOpen(true)}>
               <Icon name="plus" size={15} />
-              নতুন ইউজার
+              {t('addUser')}
             </button>
           ) : null}
         </div>
@@ -407,7 +407,7 @@ export default function LiveUsersPage() {
             </div>
             <p className="demo-stat-label">Total Users</p>
             <p className="demo-stat-value">{total}</p>
-            <p className="demo-stat-hint">সব রোল মিলিয়ে</p>
+            <p className="demo-stat-hint">{t('users.allRoles')}</p>
           </article>
           <article className="demo-stat-card">
             <div className="demo-stat-top">
@@ -427,7 +427,7 @@ export default function LiveUsersPage() {
             </div>
             <p className="demo-stat-label">Staff</p>
             <p className="demo-stat-value">{staffCount}</p>
-            <p className="demo-stat-hint">সব এরিয়া</p>
+            <p className="demo-stat-hint">{t('users.allAreas')}</p>
           </article>
           <article className="demo-stat-card">
             <div className="demo-stat-top">

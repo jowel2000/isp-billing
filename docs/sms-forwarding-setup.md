@@ -47,8 +47,9 @@ header is checked.
 Use any Android SMS forwarder and point it at the endpoint:
 
 - **SMS Forwarder** (Android app): add a rule — sender contains "Triangle"
-  (or "bKash", "Nagad", "Rocket") → POST JSON to the webhook URL with a custom
-  header `x-sms-secret: <your secret>`.
+  (or the Triangle OTP number `09612770444`) or "bKash", "Nagad", "Rocket" →
+  POST JSON to the webhook URL with a custom header
+  `x-sms-secret: <your secret>`.
 - **Tasker / MacroDroid**: SMS Received event → HTTP Request action with the
   JSON body above.
 - Later: a dedicated companion app with device tokens + signature will replace
@@ -56,6 +57,16 @@ Use any Android SMS forwarder and point it at the endpoint:
 
 Phone requirements: Android, always on, internet connected, battery
 optimization disabled for the forwarder app.
+
+Triangle specifics (confirmed with the ISP):
+- OTP sender number: **09612770444** (may arrive as `+8809612770444`).
+- OTP length: **6 digits**.
+- The server classifies any 6-digit OTP SMS from that number as a Triangle
+  OTP even when the text has no "OTP" keyword.
+- **OTP-only rule:** messages from `09612770444` are never treated as
+  payments — only OTPs are accepted from that number.
+- **Block rule:** messages containing a `pmt` marker (e.g. `pmt#123456`) are
+  ignored completely — never processed as OTP or payment.
 
 ## 4. Server-side OTP handling
 
