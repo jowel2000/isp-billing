@@ -69,11 +69,6 @@ export class UpstreamSyncService implements OnModuleInit {
     };
   }
 
-  private async isAutoSyncEnabled(): Promise<boolean> {
-    return this.config.get<string>('UPSTREAM_AUTO_SYNC') === 'true';
-  }
-
-  /** Polls the DB for a forwarded Triangle OTP (single-use, 5 min TTL). */
   private async waitForOtp(tenantId: string, timeoutMs: number): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -442,9 +437,14 @@ export class UpstreamSyncService implements OnModuleInit {
   }
 
   private async startAutoSyncIfEnabled() {
-    const enabled = await this.isAutoSyncEnabled();
+    const enabled = this.config.get<string>('UPSTREAM_AUTO_SYNC') === 'true';
     if (!enabled) return;
     if (this.autoTimer) return;
+
+    const rawInterval = Number(this.config.get<string>('UPSTREAM_AUTO_SYNC_INTERVAL_MINUTES'));
+    const intervalMinutes = Number.isFinite(rawInterval) && rawInterval >= 1 ? rawInterval : 30;
+
+    this.logger.log(`Upstream auto sync enabled — every ${intervalMinutes} minute(s)`);
 
     this.autoTimer = setInterval(async () => {
       const tenants = await this.prisma.tenant.findMany({
@@ -458,7 +458,7 @@ export class UpstreamSyncService implements OnModuleInit {
           this.logger.warn(`Auto sync failed for ${tenant.id}: ${(error as Error).message}`);
         }
       }
-    }, 30 * 60 * 1000);
+    }, intervalMinutes * 60 * 1000);
 
     this.autoTimer.unref();
   }
