@@ -12,8 +12,10 @@ import {
   getRoles,
   getUsers,
   resetUserPassword,
+  restoreUser,
   saveUserPermissions,
   setUserStatus,
+  updateManagedUser,
 } from '@/lib/live-api';
 
 const GROUP_LABELS: Record<string, string> = {
@@ -51,8 +53,12 @@ function effectivePermissions(user: ManagedUser): Set<string> {
 
 export default function LiveUsersPage() {
   const { user: actor } = useLiveAuth();
+  const isSuperAdmin = actor?.role === 'super_admin';
+
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [roleFilter, setRoleFilter] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const [search, setSearch] = useState('');
   const [roles, setRoles] = useState<ManagedRole[]>([]);
   const [permissions, setPermissions] = useState<PermissionOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -64,10 +70,13 @@ export default function LiveUsersPage() {
     loginId: '',
     mobile: '',
     password: '',
-    roleName: '',
   });
   const [addError, setAddError] = useState('');
   const [addSubmitting, setAddSubmitting] = useState(false);
+  const [editUser, setEditUser] = useState<ManagedUser | null>(null);
+  const [editForm, setEditForm] = useState({ name: '', loginId: '', mobile: '' });
+  const [editError, setEditError] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
   const [permUser, setPermUser] = useState<ManagedUser | null>(null);
   const [permDraft, setPermDraft] = useState<Record<string, boolean>>({});
   const [permSaving, setPermSaving] = useState(false);
@@ -93,7 +102,7 @@ export default function LiveUsersPage() {
     setLoading(true);
     setError('');
     const results = await Promise.allSettled([
-      getUsers(roleFilter || undefined),
+      getUsers(roleFilter || undefined, showArchived),
       getRoles(),
       getPermissions(),
     ]);
@@ -104,7 +113,7 @@ export default function LiveUsersPage() {
       setError('ইউজার ডেটা লোড করতে সমস্যা হয়েছে');
     }
     setLoading(false);
-  }, [reloadKey, roleFilter]);
+  }, [reloadKey, roleFilter, showArchived]);
 
   useEffect(() => {
     load();
@@ -117,11 +126,24 @@ export default function LiveUsersPage() {
     );
   }, [roles, actor]);
 
-  useEffect(() => {
-    if (addOpen && !addForm.roleName && availableRoles.length > 0) {
-      setAddForm((current) => ({ ...current, roleName: availableRoles[0].name }));
+  // Role is no longer selected by hand — it comes from the section (tab).
+  const creationRole = useMemo(() => {
+    if (roleFilter && availableRoles.some((role) => role.name === roleFilter)) {
+      return roleFilter;
     }
-  }, [addOpen, addForm.roleName, availableRoles]);
+    return availableRoles.find((role) => role.name === 'staff')?.name ?? availableRoles[0]?.name ?? 'staff';
+  }, [roleFilter, availableRoles]);
+
+  // Real-time search by User ID / phone / login ID / name
+  const filteredUsers = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return users;
+    return users.filter((user) =>
+      [user.userCode, user.mobile, user.loginId, user.name]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(term)),
+    );
+  }, [users, search]);
 
   const groups = useMemo(() => {
     const map = new Map<string, PermissionOption[]>();
@@ -153,16 +175,47 @@ export default function LiveUsersPage() {
         loginId: addForm.loginId.trim(),
         mobile: addForm.mobile.trim(),
         password: addForm.password,
-        roleName: addForm.roleName,
+        roleName: creationRole,
       });
-      setToast({ message: `ইউজার তৈরি হয়েছে — ${created.name}` });
+      setToast({ message: `ইউজার তৈরি হয়েছে — ${created.name} (ID: ${created.userCode ?? '—'})` });
       setAddOpen(false);
-      setAddForm({ name: '', loginId: '', mobile: '', password: '', roleName: '' });
+      setAddForm({ name: '', loginId: '', mobile: '', password: '' });
       setReloadKey((key) => key + 1);
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'ইউজার তৈরি করা যায়নি');
     } finally {
       setAddSubmitting(false);
+    }
+  }
+
+  function openEdit(target: ManagedUser) {
+    setEditUser(target);
+    setEditForm({
+      name: target.name,
+      loginId: target.loginId ?? '',
+      mobile: target.mobile,
+    });
+    setEditError('');
+  }
+
+  async function onSaveEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editUser) return;
+    setEditError('');
+    setEditSaving(true);
+    try {
+      await updateManagedUser(editUser.id, {
+        name: editForm.name.trim(),
+        loginId: editForm.loginId.trim(),
+        mobile: editForm.mobile.trim(),
+      });
+      setToast({ message: 'ইউজার আপডেট হয়েছে।' });
+      setEditUser(null);
+      setReloadKey((key) => key + 1);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'আপডেট করা যায়নি');
+    } finally {
+      setEditSaving(false);
     }
   }
 
@@ -236,10 +289,10 @@ export default function LiveUsersPage() {
     }
   }
 
-  async function onDelete(target: ManagedUser) {
+  async function onArchive(target: ManagedUser) {
     if (
       !window.confirm(
-        `${target.name}-কে delete করবেন? অ্যাকাউন্টটি disable হবে, তবে history থাকবে।`,
+        `${target.name}-কে archive করবেন? অ্যাকাউন্টটি বন্ধ হবে; record ও history থেকে যাবে। শুধু Super Admin Archived তালিকায় দেখতে পারবে।`,
       )
     ) {
       return;
@@ -247,11 +300,24 @@ export default function LiveUsersPage() {
 
     try {
       await deleteUser(target.id);
-      setToast({ message: 'ইউজার soft delete হয়েছে।' });
+      setToast({ message: 'ইউজার archive হয়েছে।' });
       setReloadKey((key) => key + 1);
     } catch (err) {
       setToast({
-        message: err instanceof Error ? err.message : 'Delete করা যায়নি',
+        message: err instanceof Error ? err.message : 'Archive করা যায়নি',
+        error: true,
+      });
+    }
+  }
+
+  async function onRestore(target: ManagedUser) {
+    try {
+      await restoreUser(target.id);
+      setToast({ message: `${target.name} আবার চালু হয়েছে।` });
+      setReloadKey((key) => key + 1);
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Restore করা যায়নি',
         error: true,
       });
     }
@@ -291,11 +357,13 @@ export default function LiveUsersPage() {
       <div className="demo-page-head">
         <div>
           <h2>
-            {roleFilter === 'admin'
-              ? 'Admin Management'
-              : roleFilter === 'staff'
-                ? 'Staff Management'
-                : 'ইউজার ও পারমিশন'}
+            {showArchived
+              ? 'Archived Users'
+              : roleFilter === 'admin'
+                ? 'Admin Management'
+                : roleFilter === 'staff'
+                  ? 'Staff Management'
+                  : 'ইউজার ও পারমিশন'}
           </h2>
           <p className="demo-page-sub">
             Super Admin → Admin → Staff → Client অ্যাক্সেস কন্ট্রোল
@@ -310,64 +378,95 @@ export default function LiveUsersPage() {
             <Icon name="trend-up" size={15} />
             রিফ্রেশ
           </button>
-          <button className="demo-btn primary" type="button" onClick={() => setAddOpen(true)}>
-            <Icon name="plus" size={15} />
-            নতুন ইউজার
-          </button>
+          {isSuperAdmin ? (
+            <button
+              className="demo-btn ghost"
+              type="button"
+              onClick={() => setShowArchived((value) => !value)}
+            >
+              <Icon name="shield" size={15} />
+              {showArchived ? 'Active Users' : 'Archived'}
+            </button>
+          ) : null}
+          {!showArchived ? (
+            <button className="demo-btn primary" type="button" onClick={() => setAddOpen(true)}>
+              <Icon name="plus" size={15} />
+              নতুন ইউজার
+            </button>
+          ) : null}
         </div>
       </div>
 
-      <section className="demo-stat-grid">
-        <article className="demo-stat-card">
-          <div className="demo-stat-top">
-            <div className="demo-stat-icon orange">
-              <Icon name="users" size={19} />
+      {!showArchived ? (
+        <section className="demo-stat-grid">
+          <article className="demo-stat-card">
+            <div className="demo-stat-top">
+              <div className="demo-stat-icon orange">
+                <Icon name="users" size={19} />
+              </div>
             </div>
-          </div>
-          <p className="demo-stat-label">Total Users</p>
-          <p className="demo-stat-value">{total}</p>
-          <p className="demo-stat-hint">সব রোল মিলিয়ে</p>
-        </article>
-        <article className="demo-stat-card">
-          <div className="demo-stat-top">
-            <div className="demo-stat-icon blue">
-              <Icon name="shield" size={19} />
+            <p className="demo-stat-label">Total Users</p>
+            <p className="demo-stat-value">{total}</p>
+            <p className="demo-stat-hint">সব রোল মিলিয়ে</p>
+          </article>
+          <article className="demo-stat-card">
+            <div className="demo-stat-top">
+              <div className="demo-stat-icon blue">
+                <Icon name="shield" size={19} />
+              </div>
             </div>
-          </div>
-          <p className="demo-stat-label">Admin</p>
-          <p className="demo-stat-value">{adminCount}</p>
-          <p className="demo-stat-hint">Super Admin + Admin</p>
-        </article>
-        <article className="demo-stat-card">
-          <div className="demo-stat-top">
-            <div className="demo-stat-icon green">
-              <Icon name="users" size={19} />
+            <p className="demo-stat-label">Admin</p>
+            <p className="demo-stat-value">{adminCount}</p>
+            <p className="demo-stat-hint">Super Admin + Admin</p>
+          </article>
+          <article className="demo-stat-card">
+            <div className="demo-stat-top">
+              <div className="demo-stat-icon green">
+                <Icon name="users" size={19} />
+              </div>
             </div>
-          </div>
-          <p className="demo-stat-label">Staff</p>
-          <p className="demo-stat-value">{staffCount}</p>
-          <p className="demo-stat-hint">সব এরিয়া</p>
-        </article>
-        <article className="demo-stat-card">
-          <div className="demo-stat-top">
-            <div className="demo-stat-icon red">
-              <Icon name="home" size={19} />
+            <p className="demo-stat-label">Staff</p>
+            <p className="demo-stat-value">{staffCount}</p>
+            <p className="demo-stat-hint">সব এরিয়া</p>
+          </article>
+          <article className="demo-stat-card">
+            <div className="demo-stat-top">
+              <div className="demo-stat-icon red">
+                <Icon name="home" size={19} />
+              </div>
             </div>
-          </div>
-          <p className="demo-stat-label">Client Users</p>
-          <p className="demo-stat-value">{clientCount}</p>
-          <p className="demo-stat-hint">Portal access</p>
-        </article>
-      </section>
+            <p className="demo-stat-label">Client Users</p>
+            <p className="demo-stat-value">{clientCount}</p>
+            <p className="demo-stat-hint">Portal access</p>
+          </article>
+        </section>
+      ) : null}
 
       <article className="demo-card">
         <div className="demo-card-head">
           <div>
-            <h3>সব ইউজার</h3>
-            <p>Admin শুধু নিজের চেয়ে নিচের রোল ম্যানেজ করতে পারবে</p>
+            <h3>{showArchived ? 'Archived Users' : 'সব ইউজার'}</h3>
+            <p>
+              {showArchived
+                ? 'শুধু Super Admin এখানে দেখতে ও restore করতে পারবে'
+                : 'User ID / ফোন নম্বর দিয়ে খুঁজুন · Admin শুধু নিজের চেয়ে নিচের রোল ম্যানেজ করতে পারবে'}
+            </p>
           </div>
-          <span className="demo-badge blue">{total}</span>
+          <span className="demo-badge blue">{filteredUsers.length}</span>
         </div>
+
+        {!showArchived ? (
+          <div className="demo-toolbar" style={{ marginBottom: 12 }}>
+            <div className="demo-search-input" style={{ width: 'min(340px, 100%)' }}>
+              <Icon name="search" size={15} />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="User ID / ফোন নম্বর খুঁজুন…"
+              />
+            </div>
+          </div>
+        ) : null}
 
         {loading ? (
           <div className="live-loading">
@@ -376,12 +475,17 @@ export default function LiveUsersPage() {
           </div>
         ) : error ? (
           <div className="live-error">{error}</div>
+        ) : filteredUsers.length === 0 ? (
+          <div className="live-empty">
+            {showArchived ? 'কোনো archived ইউজার নেই' : 'কোনো ইউজার পাওয়া যায়নি'}
+          </div>
         ) : (
           <div className="demo-table-wrap">
             <table className="demo-table">
               <thead>
                 <tr>
                   <th>User</th>
+                  <th>User ID</th>
                   <th>Role</th>
                   <th>Status</th>
                   <th>Areas</th>
@@ -390,7 +494,7 @@ export default function LiveUsersPage() {
                 </tr>
               </thead>
               <tbody>
-                {users.map((managedUser) => {
+                {filteredUsers.map((managedUser) => {
                   const manageable = canManage(managedUser);
                   const isSelf = managedUser.id === actor?.id;
                   return (
@@ -402,11 +506,10 @@ export default function LiveUsersPage() {
                           {managedUser.mobile}
                         </span>
                       </td>
+                      <td className="mono">{managedUser.userCode ?? '—'}</td>
                       <td>
                         <span
-                          className={`demo-badge ${
-                            ROLE_TONE[managedUser.role.name] ?? 'gray'
-                          }`}
+                          className={`demo-badge ${ROLE_TONE[managedUser.role.name] ?? 'gray'}`}
                         >
                           {managedUser.role.name.replace('_', ' ')}
                         </span>
@@ -430,8 +533,29 @@ export default function LiveUsersPage() {
                         <div className="live-actions">
                           {isSelf ? (
                             <span className="demo-badge gray">You</span>
+                          ) : showArchived ? (
+                            isSuperAdmin ? (
+                              <button
+                                className="demo-btn primary sm"
+                                type="button"
+                                onClick={() => onRestore(managedUser)}
+                              >
+                                <Icon name="check" size={13} />
+                                Restore
+                              </button>
+                            ) : (
+                              <span className="live-table-muted">—</span>
+                            )
                           ) : manageable ? (
                             <>
+                              <button
+                                className="demo-btn sm"
+                                type="button"
+                                onClick={() => openEdit(managedUser)}
+                              >
+                                <Icon name="edit" size={13} />
+                                Edit
+                              </button>
                               <button
                                 className="demo-btn sm"
                                 type="button"
@@ -463,9 +587,9 @@ export default function LiveUsersPage() {
                               <button
                                 className="demo-btn danger sm"
                                 type="button"
-                                onClick={() => onDelete(managedUser)}
+                                onClick={() => onArchive(managedUser)}
                               >
-                                Delete
+                                Archive
                               </button>
                             </>
                           ) : (
@@ -483,9 +607,9 @@ export default function LiveUsersPage() {
       </article>
 
       <div className="demo-note">
-        <strong>নিয়ম:</strong> Admin নিজের কাছে নেই এমন permission দিতে পারবে না।
-        Staff-এর কোনো area restriction নেই। PPPoE reveal Staff-এ ডিফল্ট ON, NID ডিফল্ট
-        OFF। Client user-এর মোবাইল Client প্রোফাইলের সাথে মিলতে হবে।
+        <strong>নিয়ম:</strong> প্রতিটি ইউজারের একটি unique User ID অটোমেটিক তৈরি হয়।
+        Archive করলে record মুছে যায় না — শুধু Super Admin Archived তালিকায় দেখতে
+        পাবে। Admin নিজের কাছে নেই এমন permission দিতে পারবে না।
       </div>
 
       {addOpen ? (
@@ -494,11 +618,7 @@ export default function LiveUsersPage() {
             <div className="live-modal-head">
               <div>
                 <h3>নতুন ইউজার</h3>
-                <p>
-                  {actor?.role === 'super_admin'
-                    ? 'Super Admin যেকোনো রোল তৈরি করতে পারবে।'
-                    : 'Admin শুধু Staff বা Client তৈরি করতে পারবে।'}
-                </p>
+                <p>Role অটোমেটিক সেট হবে: {creationRole.replace('_', ' ')} · User ID অটোমেটিক তৈরি হবে</p>
               </div>
               <button
                 className="live-modal-close"
@@ -540,7 +660,6 @@ export default function LiveUsersPage() {
                     pattern="[a-zA-Z0-9._\-]+"
                     placeholder="যেমন staff01"
                   />
-                  <small>পরবর্তীতে Login ID বদলানো যাবে না।</small>
                 </div>
                 <div className="live-field">
                   <label htmlFor="user-mobile">মোবাইল *</label>
@@ -569,31 +688,7 @@ export default function LiveUsersPage() {
                     minLength={8}
                   />
                 </div>
-                <div className="live-field">
-                  <label htmlFor="user-role">Role *</label>
-                  <select
-                    id="user-role"
-                    value={addForm.roleName}
-                    onChange={(event) =>
-                      setAddForm((current) => ({ ...current, roleName: event.target.value }))
-                    }
-                    required
-                  >
-                    {availableRoles.map((role) => (
-                      <option key={role.id} value={role.name}>
-                        {role.name.replace('_', ' ')}
-                      </option>
-                    ))}
-                  </select>
-                </div>
               </div>
-
-              {addForm.roleName === 'client' ? (
-                <div className="demo-note" style={{ marginTop: 12 }}>
-                  Client portal access পেতে এই মোবাইল নম্বরটি ঠিক ওই Client প্রোফাইলের
-                  মোবাইলের সাথে মিলতে হবে।
-                </div>
-              ) : null}
 
               {addError ? (
                 <div className="live-error" style={{ marginTop: 14 }}>
@@ -608,6 +703,89 @@ export default function LiveUsersPage() {
                 <button className="demo-btn primary" type="submit" disabled={addSubmitting}>
                   <Icon name="check" size={14} />
                   {addSubmitting ? 'তৈরি হচ্ছে…' : 'ইউজার তৈরি করুন'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {editUser ? (
+        <div className="live-modal-backdrop" onMouseDown={() => setEditUser(null)}>
+          <div className="live-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="live-modal-head">
+              <div>
+                <h3>ইউজার এডিট — {editUser.name}</h3>
+                <p>
+                  User ID: <strong>{editUser.userCode ?? '—'}</strong> · Role:{' '}
+                  {editUser.role.name.replace('_', ' ')}
+                </p>
+              </div>
+              <button
+                className="live-modal-close"
+                type="button"
+                onClick={() => setEditUser(null)}
+              >
+                <Icon name="close" size={17} />
+              </button>
+            </div>
+
+            <form onSubmit={onSaveEdit}>
+              <div className="live-form-grid">
+                <div className="live-field">
+                  <label htmlFor="edit-name">নাম *</label>
+                  <input
+                    id="edit-name"
+                    value={editForm.name}
+                    onChange={(event) =>
+                      setEditForm((current) => ({ ...current, name: event.target.value }))
+                    }
+                    required
+                    minLength={2}
+                  />
+                </div>
+                <div className="live-field">
+                  <label htmlFor="edit-login-id">Login ID *</label>
+                  <input
+                    id="edit-login-id"
+                    value={editForm.loginId}
+                    onChange={(event) =>
+                      setEditForm((current) => ({ ...current, loginId: event.target.value }))
+                    }
+                    required
+                    minLength={3}
+                    maxLength={30}
+                    pattern="[a-zA-Z0-9._\-]+"
+                  />
+                </div>
+                <div className="live-field full">
+                  <label htmlFor="edit-mobile">মোবাইল *</label>
+                  <input
+                    id="edit-mobile"
+                    type="tel"
+                    value={editForm.mobile}
+                    onChange={(event) =>
+                      setEditForm((current) => ({ ...current, mobile: event.target.value }))
+                    }
+                    required
+                    pattern="01[0-9]{9}"
+                  />
+                </div>
+              </div>
+
+              {editError ? (
+                <div className="live-error" style={{ marginTop: 14 }}>
+                  {editError}
+                </div>
+              ) : null}
+
+              <div className="live-form-actions">
+                <button className="demo-btn" type="button" onClick={() => setEditUser(null)}>
+                  বাতিল
+                </button>
+                <button className="demo-btn primary" type="submit" disabled={editSaving}>
+                  <Icon name="check" size={14} />
+                  {editSaving ? 'সেভ হচ্ছে…' : 'সেভ করুন'}
                 </button>
               </div>
             </form>

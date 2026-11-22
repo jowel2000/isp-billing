@@ -194,11 +194,31 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 
 ## Navigation & language
 
-- Sidebar order: **Dashboard → Admin → Staff → Mobile Banking → Clients → Payments → Invoices → Recharge History → Wrong Recharge → Packages → Reports → Activity & Logs → Branding → Settings**.
+- Sidebar order: **Dashboard → Admin → Staff → Mobile Banking → Clients → Payments → Invoices → Recharge History → Payment Inbox → Wrong Recharge → Packages → Reports → Activity & Logs → Branding → Settings**.
 - There are no MAIN / NETWORK / SYSTEM group headings — all items are in one list.
-- Every page (login, admin panel, demo and client portal) has a **বাংলা / English** switcher in the top bar. The choice is saved in `localStorage` under `isp_language` and applies to navigation, page titles, buttons, table headers and common labels.
+- Menu text and icons are pure white (`#FFFFFF`) for clear contrast on the navy sidebar.
+- Every page (login, admin panel, demo and client portal) has a **বাংলা / English** switcher in the top bar. The choice is saved in `localStorage` under `isp_language` and applies to navigation, page titles, buttons, table headers and common labels — including the dashboard and Admin Management sections, both directions.
 - Every page also has a **light / dark** theme button. The choice is saved in `localStorage` under `isp_theme`; both themes use the same orange/navy brand palette.
-- `apps/web/lib/auto-translate.tsx` bridges older English labels to Bangla (and restores them in English mode) without touching forms, code blocks or user data.
+- `apps/web/lib/auto-translate.tsx` bridges older mixed-language labels in both directions (English↔Bangla) without touching forms, code blocks or user data.
+
+## Users, archive & auto User ID
+
+- Creating a user no longer asks for a role: the role comes from the section (Admin tab → admin, Staff tab → staff).
+- Every user automatically receives a unique 5-digit **User ID** (`userCode`).
+- Each user row has **Edit** (name, Login ID, mobile).
+- **Delete is soft**: the user moves to `archived` status. Archived users are hidden from regular admins and only the **Super Admin** sees the Archived list and can restore users.
+- The users list has a real-time search bar (User ID, phone, Login ID, name).
+
+## Upstream diagnosis
+
+- `POST /api/v1/upstream/diagnose` (permission `upstream.manage`) checks the Triangle panel: login page structure (status, redirect, size, CAPTCHA/CSRF detection) and a credential login attempt.
+- The result is stored in the tenant settings (`upstream_diagnostic`) and an automation job trail — failures are never silent.
+- `GET /api/v1/upstream/status` shows the last diagnostic summary.
+
+## SMS forwarding & automated OTP
+
+- See `docs/sms-forwarding-setup.md` for the phone → server setup (endpoint, HMAC signature, replay protection).
+- OTP SMS is stored encrypted with a 5-minute expiry and single-use semantics; `GET /api/v1/upstream/otp/latest` (Super Admin) shows the latest pending OTP.
 
 ## Mobile Banking, 4-digit reference & Wrong Recharge
 
@@ -251,7 +271,7 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 - Login screen has a **Forgot password?** link that opens a 3-step flow: identifier → OTP → new password.
 - Endpoints: `POST /auth/forgot-password/request`, `/verify`, `/reset`.
 - OTPs are hashed (SHA-256) and stored in `OtpRequest` with a 5-minute expiry; a reset token (JWT, 10 min) is issued after verification and all refresh tokens are revoked when the password changes.
-- Until a real SMS gateway is connected the API returns the OTP in `devOtp` so the flow can be tested locally; a real SMS sender will replace this later.
+- The OTP is returned in `devOtp` only outside production (`NODE_ENV !== 'production'`) so the flow can be tested locally. In production the OTP is never exposed — a real SMS gateway must deliver it.
 - Password hashing: bcrypt cost 12.
 
 ## SMS payment inbox (automated payments)

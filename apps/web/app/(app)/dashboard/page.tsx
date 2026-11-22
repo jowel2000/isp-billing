@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RevenueChart, StatusDonut } from '@/components/demo-charts';
 import { Icon, type IconName } from '@/components/icon';
+import { useI18n } from '@/lib/i18n';
 import { useLiveAuth } from '@/lib/live-auth';
 import type {
   ApiPackage,
@@ -55,6 +56,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 export default function LiveDashboardPage() {
   const { user } = useLiveAuth();
+  const { t } = useI18n();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -216,21 +218,21 @@ export default function LiveDashboardPage() {
     <>
       <div className="demo-page-head">
         <div>
-          <h2>ড্যাশবোর্ড</h2>
+          <h2>{t('nav.dashboard')}</h2>
           <p className="demo-page-sub">
-            {new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })} · লাইভ
-            ডেটাবেস থেকে
+            {new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })} ·{' '}
+            {t('dash.liveDb')}
           </p>
         </div>
         <div className="demo-actions">
           <button className="demo-btn ghost" type="button" onClick={load}>
             <Icon name="trend-up" size={15} />
-            রিফ্রেশ
+            {t('dash.refresh')}
           </button>
           {canCreate ? (
             <Link href="/clients?add=1" className="demo-btn primary">
               <Icon name="plus" size={15} />
-              নতুন ক্লায়েন্ট
+              {t('dash.addClient')}
             </Link>
           ) : null}
         </div>
@@ -260,7 +262,7 @@ export default function LiveDashboardPage() {
         <div className="demo-card">
           <div className="live-loading">
             <div className="live-spinner" />
-            লাইভ ডেটা লোড হচ্ছে…
+            {t('dash.loading')}
           </div>
         </div>
       ) : null}
@@ -287,14 +289,14 @@ export default function LiveDashboardPage() {
             <article className="demo-card">
               <div className="demo-card-head">
                 <div>
-                  <h3>মাসিক কালেকশন</h3>
-                  <p>শেষ ৮ মাস · verified payments</p>
+                  <h3>{t('dash.monthlyCollection')}</h3>
+                  <p>{t('dash.last8Months')}</p>
                 </div>
                 <span className="demo-badge green">Live</span>
               </div>
               <div className="demo-chart-total">
                 <strong>{formatPaisa(data.collection?.totalPaisa ?? 0)}</strong>
-                <span>মোট সংগৃহীত</span>
+                <span>{t('dash.totalCollected')}</span>
               </div>
               {monthlyData.length > 0 ? (
                 <RevenueChart
@@ -302,7 +304,7 @@ export default function LiveDashboardPage() {
                   labelFormatter={(amount) => `৳${Math.round(amount).toLocaleString()}`}
                 />
               ) : (
-                <div className="live-empty">এখনো কোনো verified payment নেই।</div>
+                <div className="live-empty">{t('dash.noVerified')}</div>
               )}
               <div className="demo-chart-legend">
                 <span>
@@ -319,17 +321,17 @@ export default function LiveDashboardPage() {
             <article className="demo-card">
               <div className="demo-card-head">
                 <div>
-                  <h3>ক্লায়েন্ট স্ট্যাটাস</h3>
-                  <p>মোট {data.totalClients} জন ক্লায়েন্ট</p>
+                  <h3>{t('dash.clientStatus')}</h3>
+                  <p>{t('dash.clientsCount').replace('{n}', String(data.totalClients))}</p>
                 </div>
                 <Link href="/clients" className="demo-card-link">
-                  সব দেখুন <Icon name="chevron-right" size={13} />
+                  {t('dash.viewAll')} <Icon name="chevron-right" size={13} />
                 </Link>
               </div>
               {statusTotal > 0 ? (
-                <StatusDonut slices={statusSlices} total={statusTotal} label="Clients" />
+                <StatusDonut slices={statusSlices} total={statusTotal} label={t('nav.clients')} />
               ) : (
-                <div className="live-empty">এখনো কোনো ক্লায়েন্ট যোগ হয়নি।</div>
+                <div className="live-empty">{t('dash.noClients')}</div>
               )}
               <div className="demo-note" style={{ marginTop: 16 }}>
                 <strong>{data.status.expired} expired</strong> · {data.status.inactive}{' '}
@@ -342,23 +344,23 @@ export default function LiveDashboardPage() {
             <article className="demo-card">
               <div className="demo-card-head">
                 <div>
-                  <h3>সাম্প্রতিক পেমেন্ট</h3>
-                  <p>সর্বশেষ bKash ও ক্যাশ ট্রানজেকশন</p>
+                  <h3>{t('dash.recentPayments')}</h3>
+                  <p>{t('dash.latestTx')}</p>
                 </div>
                 <span className="demo-badge gray">{data.recent.length} shown</span>
               </div>
               {data.recent.length === 0 ? (
-                <div className="live-empty">এখনো কোনো পেমেন্ট নেই।</div>
+                <div className="live-empty">{t('dash.noPayments')}</div>
               ) : (
                 <div className="demo-table-wrap">
                   <table className="demo-table">
                     <thead>
                       <tr>
-                        <th>ক্লায়েন্ট</th>
-                        <th>মেথড</th>
+                        <th>{t('nav.clients')}</th>
+                        <th>{t('dash.method')}</th>
                         <th>Trx ID</th>
-                        <th>পরিমাণ</th>
-                        <th>স্ট্যাটাস</th>
+                        <th>{t('dash.amount')}</th>
+                        <th>{t('dash.status')}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -393,13 +395,13 @@ export default function LiveDashboardPage() {
             <article className="demo-card">
               <div className="demo-card-head">
                 <div>
-                  <h3>ভেরিফিকেশন অপেক্ষায়</h3>
-                  <p>{data.pending.length}টি পেমেন্ট</p>
+                  <h3>{t('dash.pendingVerification')}</h3>
+                  <p>{t('dash.paymentsCount').replace('{n}', String(data.pending.length))}</p>
                 </div>
                 <span className="demo-badge amber">{data.pending.length} pending</span>
               </div>
               {data.pending.length === 0 ? (
-                <div className="live-empty">সব পেমেন্ট verified ✅</div>
+                <div className="live-empty">{t('dash.allVerified')}</div>
               ) : (
                 <ul className="demo-list">
                   {data.pending.map((payment, index) => (
@@ -434,16 +436,13 @@ export default function LiveDashboardPage() {
                     onClick={() => onVerify(data.pending[0].id)}
                   >
                     <Icon name="check" size={14} />
-                    {verifying === data.pending[0].id ? 'Verifying…' : 'প্রথমটি Verify করুন'}
+                    {verifying === data.pending[0].id ? t('dash.verifying') : t('dash.verifyFirst')}
                   </button>
                 ) : (
-                  <span className="demo-badge gray">payments.verify permission নেই</span>
+                  <span className="demo-badge gray">{t('dash.noPermVerify')}</span>
                 )}
               </div>
-              <p className="live-perm-note">
-                Verify করলে invoice paid হবে, ledger entry তৈরি হবে এবং auto-recharge চালু
-                থাকলে recharge job queue হবে।
-              </p>
+              <p className="live-perm-note">{t('dash.verifyNote')}</p>
             </article>
           </section>
 
@@ -451,13 +450,13 @@ export default function LiveDashboardPage() {
             <article className="demo-card">
               <div className="demo-card-head">
                 <div>
-                  <h3>Top Due</h3>
-                  <p>সবচেয়ে বেশি বাকি</p>
+                  <h3>{t('dash.topDue')}</h3>
+                  <p>{t('dash.topDueSub')}</p>
                 </div>
                 <span className="demo-badge red">{data.due?.count ?? 0}</span>
               </div>
               {topDue.length === 0 ? (
-                <div className="live-empty">কোনো due নেই ✅</div>
+                <div className="live-empty">{t('dash.noDue')}</div>
               ) : (
                 topDue.map((item) => (
                   <div className="demo-area-row" key={item.id}>
@@ -475,7 +474,7 @@ export default function LiveDashboardPage() {
                     </div>
                     <div className="demo-area-top">
                       <span>{item.client?.publicId ?? '—'}</span>
-                      <span>Due {formatDate(item.dueDate)}</span>
+                      <span>{t('dash.dueOn').replace('{date}', formatDate(item.dueDate))}</span>
                     </div>
                   </div>
                 ))
@@ -485,19 +484,21 @@ export default function LiveDashboardPage() {
             <article className="demo-card">
               <div className="demo-card-head">
                 <div>
-                  <h3>প্যাকেজ মিক্স</h3>
-                  <p>সক্রিয় ক্লায়েন্ট অনুযায়ী</p>
+                  <h3>{t('dash.packageMix')}</h3>
+                  <p>{t('dash.byActiveClients')}</p>
                 </div>
                 <span className="demo-badge blue">{data.packages.length}</span>
               </div>
               {topPackages.length === 0 ? (
-                <div className="live-empty">কোনো প্যাকেজ assigned নেই।</div>
+                <div className="live-empty">{t('dash.noPackages')}</div>
               ) : (
                 topPackages.map((pkg) => (
                   <div className="demo-area-row" key={pkg.id}>
                     <div className="demo-area-top">
                       <strong>{pkg.name}</strong>
-                      <span>{pkg._count?.subscriptions ?? 0} জন</span>
+                      <span>
+                        {pkg._count?.subscriptions ?? 0} {t('dash.subs')}
+                      </span>
                     </div>
                     <div className="demo-progress">
                       <span
@@ -516,42 +517,42 @@ export default function LiveDashboardPage() {
             <article className="demo-card">
               <div className="demo-card-head">
                 <div>
-                  <h3>{data.profit ? 'Profit & Margin' : 'দ্রুত কাজ'}</h3>
-                  <p>{data.profit ? 'VAT বাদ দিয়ে' : 'পরবর্তী ধাপ'}</p>
+                  <h3>{data.profit ? t('dash.profitTitle') : t('dash.quickActions')}</h3>
+                  <p>{data.profit ? t('dash.vatExcluded') : t('dash.nextSteps')}</p>
                 </div>
               </div>
               {data.profit ? (
                 <>
                   <div className="demo-area-row">
                     <div className="demo-area-top">
-                      <strong>Revenue</strong>
+                      <strong>{t('dash.revenue')}</strong>
                       <span>{formatPaisa(data.profit.revenuePaisa)}</span>
                     </div>
                   </div>
                   <div className="demo-area-row">
                     <div className="demo-area-top">
-                      <strong>Upstream cost</strong>
+                      <strong>{t('dash.upstreamCost')}</strong>
                       <span>{formatPaisa(data.profit.upstreamCostPaisa)}</span>
                     </div>
                   </div>
                   <div className="demo-area-row">
                     <div className="demo-area-top">
-                      <strong>Margin</strong>
+                      <strong>{t('dash.margin')}</strong>
                       <span>{formatPaisa(data.profit.grossMarginPaisa)}</span>
                     </div>
                   </div>
                   <div className="demo-note" style={{ marginTop: 12 }}>
-                    VAT সংগৃহীত <strong>{formatPaisa(data.profit.vatPaisa)}</strong> — আলাদা
-                    report-এ দেখানো হবে।
+                    {t('dash.vatNote')} <strong>{formatPaisa(data.profit.vatPaisa)}</strong> —{' '}
+                    {t('dash.vatNoteTail')}
                   </div>
                 </>
               ) : (
                 <div style={{ display: 'grid', gap: 8 }}>
                   <Link href="/clients?add=1" className="demo-btn primary">
-                    <Icon name="plus" size={14} /> নতুন ক্লায়েন্ট
+                    <Icon name="plus" size={14} /> {t('dash.addClient')}
                   </Link>
                   <Link href="/clients" className="demo-btn">
-                    <Icon name="users" size={14} /> ক্লায়েন্ট লিস্ট
+                    <Icon name="users" size={14} /> {t('dash.clientList')}
                   </Link>
                 </div>
               )}
@@ -560,9 +561,9 @@ export default function LiveDashboardPage() {
 
           {data.totalClients === 0 ? (
             <div className="demo-note">
-              <strong>শুরু করুন:</strong> এখনো কোনো ক্লায়েন্ট নেই।{' '}
+              <strong>{t('dash.getStarted')}</strong> {t('dash.noClients')}{' '}
               <Link href="/clients?add=1" className="demo-card-link">
-                প্রথম ক্লায়েন্ট যোগ করুন <Icon name="chevron-right" size={12} />
+                {t('dash.firstClient')} <Icon name="chevron-right" size={12} />
               </Link>
             </div>
           ) : null}

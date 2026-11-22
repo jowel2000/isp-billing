@@ -322,7 +322,9 @@ export default function LoginPage() {
                   <div className="fp-demo-otp">
                     {t('auth.demoOtp')} <strong>{fpDevOtp}</strong>
                   </div>
-                ) : null}
+                ) : (
+                  <div className="fp-note">{t('auth.otpSentNote')}</div>
+                )}
                 <label>
                   <span>{t('auth.otpLabel')}</span>
                   <input

@@ -186,11 +186,21 @@ export class AuthService {
       },
     });
 
+    // SECURITY: never expose the OTP in production. Until an SMS gateway is
+    // connected, local development returns it in the response for testing.
+    const isDevelopment = process.env.NODE_ENV !== 'production';
+
     return {
       sent: true,
-      devOtp: otp,
-      expiresIn: 300,
-      note: 'SMS gateway is not configured — OTP returned for local testing',
+      ...(isDevelopment
+        ? {
+            devOtp: otp,
+            expiresIn: 300,
+            note: 'SMS gateway is not configured — OTP returned for local testing',
+          }
+        : {
+            note: 'OTP sent to the registered mobile number (SMS gateway required)',
+          }),
     };
   }
 

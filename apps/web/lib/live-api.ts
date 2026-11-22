@@ -405,6 +405,7 @@ export interface ManagedUser {
   name: string;
   mobile: string;
   loginId: string | null;
+  userCode: string | null;
   email: string | null;
   status: string;
   lastLoginAt: string | null;
@@ -502,14 +503,33 @@ export function matchSmsPayment(id: string, clientId: string) {
   });
 }
 
-export function getUsers(role?: string) {
-  const query = role ? `?role=${encodeURIComponent(role)}` : '';
+export function getUsers(role?: string, archived = false) {
+  const params = new URLSearchParams();
+  if (role) params.set('role', role);
+  if (archived) params.set('archived', 'true');
+  const query = params.toString() ? `?${params.toString()}` : '';
   return liveFetch<ManagedUser[]>(`/users${query}`);
 }
 
 export function deleteUser(id: string) {
   return liveFetch<{ success: boolean }>(`/users/${id}`, {
     method: 'DELETE',
+  });
+}
+
+export function restoreUser(id: string) {
+  return liveFetch<ManagedUser>(`/users/${id}/restore`, {
+    method: 'POST',
+  });
+}
+
+export function updateManagedUser(
+  id: string,
+  payload: { name?: string; mobile?: string; loginId?: string; email?: string },
+) {
+  return liveFetch<ManagedUser>(`/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
   });
 }
 

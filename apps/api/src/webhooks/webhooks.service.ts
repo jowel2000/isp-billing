@@ -4,8 +4,9 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import type { AuthUser } from '../auth/types/auth-user';
+import { encryptString } from '../common/crypto';
 import { OtpStore } from '../upstream/otp.store';
 import { PaymentsService } from '../payments/payments.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -38,9 +39,41 @@ export class WebhooksService {
     if (!body) return { accepted: false, reason: 'empty_message' };
 
     const receivedAt = dto.receivedAt ? new Date(dto.receivedAt) : null;
+    // The signature contract hashes the RAW fields exactly as the phone sent
+    // them (empty string when omitted), so the client can reproduce the hash.
+    const rawSender = dto.sender ?? dto.from ?? '';
+    const rawBody = dto.message ?? dto.body ?? dto.text ?? '';
+    const rawReceivedAt = dto.receivedAt ?? '';
     const bodyHash = createHash('sha256')
-      .update(`${sender ?? ''}|${body}|${receivedAt?.toISOString() ?? ''}`)
+      .update(`${rawSender}|${rawBody}|${rawReceivedAt}`)
       .digest('hex');
+
+    // Replay protection: a nonce may only be used once per tenant.
+    if (dto.nonce) {
+      const reused = await this.prisma.smsInbound.findUnique({
+        where: { tenantId_nonce: { tenantId: tenant.id, nonce: dto.nonce } },
+      });
+      if (reused) {
+        return { accepted: false, duplicate: true, reason: 'nonce-replay' };
+      }
+    }
+
+    // Signature authentication (HMAC-SHA256 over timestamp.nonce.bodyHash).
+    if (dto.signature || dto.timestamp) {
+      if (!dto.signature || !dto.timestamp || !dto.nonce) {
+        throw new UnauthorizedException('Signature requires timestamp and nonce');
+      }
+      const ts = Number(dto.timestamp);
+      if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > 5 * 60 * 1000) {
+        throw new UnauthorizedException('Timestamp is outside the allowed window');
+      }
+      const expected = createHmac('sha256', process.env.SMS_FORWARD_SECRET || '')
+        .update(`${dto.timestamp}.${dto.nonce}.${bodyHash}`)
+        .digest('hex');
+      if (dto.signature.toLowerCase() !== expected.toLowerCase()) {
+        throw new UnauthorizedException('Invalid SMS signature');
+      }
+    }
 
     const duplicate = await this.prisma.smsInbound.findUnique({
       where: { tenantId_bodyHash: { tenantId: tenant.id, bodyHash } },
@@ -55,25 +88,47 @@ export class WebhooksService {
     }
 
     const parsed = this.parser.parse(body, sender);
-    const record = await this.prisma.smsInbound.create({
-      data: {
-        tenantId: tenant.id,
-        sender,
-        body,
-        bodyHash,
-        kind: parsed.kind,
-        provider: parsed.provider,
-        amountPaisa: parsed.amountPaisa ?? null,
-        trxId: parsed.trxId,
-        referenceCode: parsed.referenceCode,
-        senderMobile: parsed.senderMobile,
-        otpCode: parsed.otpCode,
-        receivedAt,
-      },
-    });
+    let record;
+    try {
+      record = await this.prisma.smsInbound.create({
+        data: {
+          tenantId: tenant.id,
+          sender,
+          body,
+          bodyHash,
+          nonce: dto.nonce ?? null,
+          kind: parsed.kind,
+          provider: parsed.provider,
+          amountPaisa: parsed.amountPaisa ?? null,
+          trxId: parsed.trxId,
+          referenceCode: parsed.referenceCode,
+          senderMobile: parsed.senderMobile,
+          otpCode: parsed.otpCode,
+          receivedAt,
+        },
+      });
+    } catch (error: any) {
+      if (error?.code === 'P2002') {
+        return { accepted: false, duplicate: true, reason: 'already-stored' };
+      }
+      throw error;
+    }
 
     if (parsed.kind === 'otp' && parsed.otpCode) {
+      // Keep it in memory for the in-process worker AND persist an encrypted,
+      // short-lived copy in the DB so it survives restarts.
       this.otpStore.set('default', parsed.otpCode);
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+      await this.prisma.otpRequest.create({
+        data: {
+          tenantId: tenant.id,
+          context: 'triangle_login',
+          codeHash: createHash('sha256').update(parsed.otpCode).digest('hex'),
+          codeEnc: encryptString(parsed.otpCode),
+          expiresAt,
+        },
+      });
+
       await this.prisma.smsInbound.update({
         where: { id: record.id },
         data: { status: 'otp' },
@@ -83,6 +138,7 @@ export class WebhooksService {
         smsId: record.id,
         kind: 'otp',
         status: 'otp',
+        expiresAt: expiresAt.toISOString(),
       };
     }
 

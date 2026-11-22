@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -15,5 +15,11 @@ export class UpstreamController {
   @RequirePermissions('upstream.manage')
   status(@CurrentUser() user: AuthUser) {
     return this.upstreamService.status(user.tenantId);
+  }
+
+  @Post('diagnose')
+  @RequirePermissions('upstream.manage')
+  diagnose(@CurrentUser() user: AuthUser) {
+    return this.upstreamService.diagnose(user.tenantId);
   }
 }

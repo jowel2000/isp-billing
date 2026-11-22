@@ -32,7 +32,8 @@ export type IconName =
   | 'eye-off'
   | 'image'
   | 'sun'
-  | 'moon';
+  | 'moon'
+  | 'edit';
 
 const paths: Record<IconName, ReactNode> = {
   grid: (
@@ -242,6 +243,12 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   moon: <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />,
+  edit: (
+    <>
+      <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+      <path d="m15 5 4 4" />
+    </>
+  ),
 };
 
 export function Icon({

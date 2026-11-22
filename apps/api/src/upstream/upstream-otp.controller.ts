@@ -13,13 +13,18 @@ import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import type { AuthUser } from '../auth/types/auth-user';
+import { decryptString } from '../common/crypto';
+import { PrismaService } from '../prisma/prisma.service';
 import { OtpStore } from './otp.store';
 
 const KEY = 'default';
 
 @Controller('upstream/otp')
 export class UpstreamOtpController {
-  constructor(private readonly store: OtpStore) {}
+  constructor(
+    private readonly store: OtpStore,
+    private readonly prisma: PrismaService,
+  ) {}
 
   @Post('inbound')
   inbound(
@@ -44,5 +49,37 @@ export class UpstreamOtpController {
   @RequirePermissions('upstream.manage')
   status(@CurrentUser() _user: AuthUser) {
     return this.store.status(KEY);
+  }
+
+  /**
+   * Latest pending OTP forwarded for the upstream (Triangle) login.
+   * Used by the automation worker / diagnostics. Authorized managers only.
+   */
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Get('latest')
+  @RequirePermissions('upstream.manage')
+  async latest(@CurrentUser() user: AuthUser) {
+    const record = await this.prisma.otpRequest.findFirst({
+      where: {
+        tenantId: user.tenantId,
+        context: 'triangle_login',
+        status: 'pending',
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { requestedAt: 'desc' },
+      select: { id: true, codeEnc: true, expiresAt: true, requestedAt: true },
+    });
+
+    if (!record || !record.codeEnc) {
+      return { hasOtp: false, otp: null, expiresAt: null };
+    }
+
+    return {
+      hasOtp: true,
+      otp: decryptString(record.codeEnc),
+      expiresAt: record.expiresAt,
+      receivedAt: record.requestedAt,
+      id: record.id,
+    };
   }
 }

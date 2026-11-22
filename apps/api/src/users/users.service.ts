@@ -11,12 +11,14 @@ import type { AuthUser } from '../auth/types/auth-user';
 import { CreateUserDto } from './dto/create-user.dto';
 import { ListUsersDto } from './dto/list-users.dto';
 import { PermissionOverrideDto } from './dto/update-permissions.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
 
 const SAFE_USER_SELECT = {
   id: true,
   name: true,
   mobile: true,
   loginId: true,
+  userCode: true,
   email: true,
   status: true,
   lastLoginAt: true,
@@ -39,8 +41,11 @@ export class UsersService {
 
   async list(actor: AuthUser, query: ListUsersDto = {}) {
     const requestedRole = query.role;
+    const isSuperAdmin = actor.role === 'super_admin';
+    const showArchived = isSuperAdmin && query.archived === 'true';
+
     const allowedRoles =
-      actor.role === 'super_admin'
+      isSuperAdmin
         ? requestedRole
           ? [requestedRole]
           : undefined
@@ -48,11 +53,28 @@ export class UsersService {
           ? [requestedRole]
           : ['staff', 'client'];
 
+    const search = query.search?.trim();
+    const searchWhere = search
+      ? {
+          OR: [
+            { userCode: { contains: search } },
+            { mobile: { contains: search } },
+            { loginId: { contains: search } },
+            { name: { contains: search } },
+          ],
+        }
+      : {};
+
     return this.prisma.user.findMany({
       where: {
         tenantId: actor.tenantId,
-        status: { not: 'deleted' },
+        // Archived users are hidden from everyone except the Super Admin
+        // (who can list them with ?archived=true).
+        status: showArchived
+          ? 'archived'
+          : { notIn: ['deleted', 'archived'] },
         ...(allowedRoles ? { role: { name: { in: allowedRoles } } } : {}),
+        ...searchWhere,
       },
       select: SAFE_USER_SELECT,
       orderBy: [{ role: { level: 'asc' } }, { createdAt: 'asc' }],
@@ -69,10 +91,11 @@ export class UsersService {
       throw new ForbiddenException('Super Admin cannot be deleted');
     }
 
+    // Soft delete: move to "archived" instead of removing the record.
     await this.prisma.$transaction([
       this.prisma.user.update({
         where: { id: target.id },
-        data: { status: 'deleted', deletedAt: new Date() },
+        data: { status: 'archived', deletedAt: new Date() },
       }),
       this.prisma.refreshToken.updateMany({
         where: { userId: target.id, revokedAt: null },
@@ -80,13 +103,82 @@ export class UsersService {
       }),
     ]);
 
-    await this.audit(actor, 'user.delete', 'user', target.id, {
+    await this.audit(actor, 'user.archive', 'user', target.id, {
       loginId: target.loginId,
       mobile: target.mobile,
       role: target.role.name,
     });
 
     return { success: true };
+  }
+
+  /** Only the Super Admin can bring an archived user back. */
+  async restoreUser(actor: AuthUser, userId: string) {
+    if (actor.role !== 'super_admin') {
+      throw new ForbiddenException('Only the Super Admin can restore archived users');
+    }
+
+    const target = await this.prisma.user.findFirst({
+      where: { id: userId, tenantId: actor.tenantId, status: 'archived' },
+      include: { role: true },
+    });
+    if (!target) {
+      throw new NotFoundException('Archived user not found');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: target.id },
+      data: { status: 'active', deletedAt: null },
+      select: SAFE_USER_SELECT,
+    });
+
+    await this.audit(actor, 'user.restore', 'user', target.id, {
+      loginId: target.loginId,
+      role: target.role.name,
+    });
+
+    return updated;
+  }
+
+  async updateUser(actor: AuthUser, userId: string, dto: UpdateUserDto) {
+    const target = await this.findManageableUser(actor, userId);
+
+    if (dto.mobile && dto.mobile !== target.mobile) {
+      const existing = await this.prisma.user.findUnique({
+        where: { tenantId_mobile: { tenantId: actor.tenantId, mobile: dto.mobile } },
+      });
+      if (existing) {
+        throw new ConflictException('A user with this mobile number already exists');
+      }
+    }
+
+    if (dto.loginId && dto.loginId !== target.loginId) {
+      const existingLogin = await this.prisma.user.findFirst({
+        where: { tenantId: actor.tenantId, loginId: dto.loginId },
+      });
+      if (existingLogin) {
+        throw new ConflictException('This login ID is already taken');
+      }
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: target.id },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(dto.mobile !== undefined ? { mobile: dto.mobile } : {}),
+        ...(dto.loginId !== undefined ? { loginId: dto.loginId } : {}),
+        ...(dto.email !== undefined ? { email: dto.email } : {}),
+      },
+      select: SAFE_USER_SELECT,
+    });
+
+    await this.audit(actor, 'user.update', 'user', target.id, {
+      name: dto.name,
+      mobile: dto.mobile,
+      loginId: dto.loginId,
+    });
+
+    return updated;
   }
 
   async listRoles(actor: AuthUser) {
@@ -102,12 +194,16 @@ export class UsersService {
   }
 
   async create(actor: AuthUser, dto: CreateUserDto) {
+    // Role selection is no longer exposed in the UI: the role is derived
+    // from the section the admin is in (Admin tab → admin, Staff tab → staff).
+    const roleName = dto.roleName ?? 'staff';
+
     const role = await this.prisma.role.findUnique({
-      where: { tenantId_name: { tenantId: actor.tenantId, name: dto.roleName } },
+      where: { tenantId_name: { tenantId: actor.tenantId, name: roleName } },
     });
 
     if (!role) {
-      throw new BadRequestException(`Unknown role: ${dto.roleName}`);
+      throw new BadRequestException(`Unknown role: ${roleName}`);
     }
 
     this.assertCanManageRole(actor, role.level);
@@ -133,12 +229,16 @@ export class UsersService {
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
 
+    // Every user gets a unique individual User ID automatically.
+    const userCode = await this.generateUserCode(actor.tenantId);
+
     const user = await this.prisma.user.create({
       data: {
         tenantId: actor.tenantId,
         name: dto.name,
         mobile: dto.mobile,
         loginId: dto.loginId,
+        userCode,
         passwordHash,
         roleId: role.id,
         areaScopes: areaIds.length
@@ -152,11 +252,25 @@ export class UsersService {
       name: dto.name,
       mobile: dto.mobile,
       loginId: dto.loginId,
-      role: dto.roleName,
+      userCode,
+      role: roleName,
       areaIds,
     });
 
     return user;
+  }
+
+  /** Generates a unique 5-digit User ID for the tenant (e.g. 10001). */
+  private async generateUserCode(tenantId: string): Promise<string> {
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      const code = String(10000 + Math.floor(Math.random() * 90000));
+      const existing = await this.prisma.user.findUnique({
+        where: { tenantId_userCode: { tenantId, userCode: code } },
+        select: { id: true },
+      });
+      if (!existing) return code;
+    }
+    throw new BadRequestException('Could not allocate a unique User ID');
   }
 
   async updatePermissions(actor: AuthUser, userId: string, overrides: PermissionOverrideDto[]) {

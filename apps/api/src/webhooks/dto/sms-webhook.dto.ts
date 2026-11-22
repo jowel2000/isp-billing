@@ -35,4 +35,19 @@ export class SmsWebhookDto {
   @IsString()
   @MaxLength(80)
   deviceId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  signature?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  timestamp?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  nonce?: string;
 }

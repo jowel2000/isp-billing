@@ -21,6 +21,7 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { UpdateAreasDto } from './dto/update-areas.dto';
 import { UpdatePermissionsDto } from './dto/update-permissions.dto';
 import { UpdateStatusDto } from './dto/update-status.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
 import { UsersService } from './users.service';
 
 @Controller('users')
@@ -74,6 +75,20 @@ export class UsersController {
     @Body() dto: UpdateStatusDto,
   ) {
     return this.usersService.updateStatus(user, id, dto.status);
+  }
+
+  @Patch(':id')
+  update(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateUserDto,
+  ) {
+    return this.usersService.updateUser(user, id, dto);
+  }
+
+  @Post(':id/restore')
+  restore(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.usersService.restoreUser(user, id);
   }
 
   @Post(':id/reset-password')

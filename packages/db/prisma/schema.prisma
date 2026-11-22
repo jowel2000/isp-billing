@@ -52,6 +52,7 @@ model User {
   name         String
   mobile       String
   loginId      String?
+  userCode     String?
   email        String?
   passwordHash String
   roleId       String
@@ -73,6 +74,7 @@ model User {
 
   @@unique([tenantId, mobile])
   @@unique([tenantId, loginId])
+  @@unique([tenantId, userCode])
   @@index([tenantId, roleId])
 }
 
@@ -421,6 +423,7 @@ model SmsInbound {
   referenceCode String?
   senderMobile  String?
   otpCode       String?
+  nonce         String?
   status        String  @default("new") // new | verified | pending | unmatched | ignored | error
   paymentId     String?
   payment       Payment? @relation(fields: [paymentId], references: [id])
@@ -429,6 +432,7 @@ model SmsInbound {
   createdAt     DateTime @default(now())
 
   @@unique([tenantId, bodyHash])
+  @@unique([tenantId, nonce])
   @@index([tenantId, kind, createdAt])
   @@index([tenantId, status, createdAt])
 }
@@ -619,6 +623,7 @@ model OtpRequest {
   expiresAt   DateTime?
   context     String?
   codeHash    String?
+  codeEnc     String?
   respondedBy String?
   responder   User? @relation("OtpResponder", fields: [respondedBy], references: [id])
 

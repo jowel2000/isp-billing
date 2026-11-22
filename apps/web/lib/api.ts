@@ -72,8 +72,8 @@ export async function login(loginId: string, password: string): Promise<LoginRes
 
 export interface ForgotRequestResponse {
   sent: boolean;
-  devOtp: string;
-  expiresIn: number;
+  devOtp?: string;
+  expiresIn?: number;
   note?: string;
 }
 

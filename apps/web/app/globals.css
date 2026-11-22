@@ -448,7 +448,7 @@ button {
   border: 1px solid transparent;
   border-radius: 12px;
   background: transparent;
-  color: #a7b5cc;
+  color: #ffffff;
   font-size: 0.9rem;
   text-align: left;
 }
@@ -1152,5 +1152,11 @@ html[data-theme='light'] .fp-form input[type='password'] {
 .fp-demo-otp strong {
   font-family: ui-monospace, 'Cascadia Code', monospace;
   letter-spacing: 0.12em;
+}
+
+.fp-note {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.5;
 }
 
