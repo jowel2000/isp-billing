@@ -1,8 +1,10 @@
 import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
+import { RequireRoles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
 import type { AuthUser } from '../auth/types/auth-user';
 import { UpstreamService } from './upstream.service';
 import { UpstreamSyncService } from './upstream-sync.service';
@@ -40,5 +42,17 @@ export class UpstreamController {
     },
   ) {
     return this.syncService.sync(user.tenantId, body ?? {});
+  }
+
+  /**
+   * Refresh button endpoint — strictly Super Admin / Admin / Staff only.
+   * Logs in to the upstream, scrapes and syncs the data, and returns the
+   * result together with the last updated timestamp.
+   */
+  @Post('refresh')
+  @UseGuards(RolesGuard)
+  @RequireRoles('super_admin', 'admin', 'staff')
+  refresh(@CurrentUser() user: AuthUser) {
+    return this.syncService.sync(user.tenantId);
   }
 }

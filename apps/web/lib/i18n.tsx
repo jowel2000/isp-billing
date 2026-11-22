@@ -59,6 +59,12 @@ const dictionary: Record<string, { bn: string; en: string }> = {
     bn: 'আসল API ও ডেটাবেসে যুক্ত। SQLite dev · PostgreSQL-ready।',
     en: 'Connected to the real API and database.',
   },
+  'app.refreshTitle': { bn: 'Upstream থেকে ডেটা refresh', en: 'Refresh data from upstream' },
+  'app.refreshNow': { bn: 'Refresh', en: 'Refresh' },
+  'app.refreshSyncing': { bn: 'Refresh হচ্ছে…', en: 'Refreshing…' },
+  'app.refreshDone': { bn: 'Refresh সম্পন্ন ✓', en: 'Refreshed ✓' },
+  'app.refreshOtp': { bn: 'OTP এলে ডেটা আসবে', en: 'Waiting for OTP' },
+  'app.refreshError': { bn: 'Refresh ব্যর্থ', en: 'Refresh failed' },
   'app.logout': { bn: 'লগআউট', en: 'Logout' },
   'auth.signIn': { bn: 'লগইন', en: 'Login' },
   'auth.signInHint': {

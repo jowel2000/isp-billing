@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { useBranding } from '@/lib/branding';
 import { useI18n } from '@/lib/i18n';
 import { useLiveAuth } from '@/lib/live-auth';
+import { liveFetch } from '@/lib/live-api';
 import { BrandMark } from './brand-mark';
 import { Icon, IconName } from './icon';
 import { LanguageSwitcher } from './language-switcher';
@@ -107,12 +108,48 @@ const ROLE_LABELS: Record<string, string> = {
   client: 'Client',
 };
 
+// Only these roles may see and use the Refresh (upstream sync) button.
+const REFRESH_ROLES = ['super_admin', 'admin', 'staff'];
+
+interface RefreshResult {
+  status: string;
+  lastUpdatedAt?: string | null;
+  errors?: string[];
+}
+
 export function LiveShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const branding = useBranding();
   const { t } = useI18n();
   const { user, logout } = useLiveAuth();
   const [open, setOpen] = useState(false);
+  const [refreshState, setRefreshState] = useState<
+    'idle' | 'refreshing' | 'done' | 'otp' | 'error'
+  >('idle');
+
+  // Strict role check (frontend): Super Admin / Admin / Staff only.
+  const canRefresh = user ? REFRESH_ROLES.includes(user.role) : false;
+
+  async function onUpstreamRefresh() {
+    if (!canRefresh || refreshState === 'refreshing') return;
+    setRefreshState('refreshing');
+    try {
+      const result = await liveFetch<RefreshResult>('/upstream/refresh', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      setRefreshState(
+        result.status === 'otp_required'
+          ? 'otp'
+          : result.status === 'completed'
+            ? 'done'
+            : 'error',
+      );
+    } catch {
+      setRefreshState('error');
+    }
+    setTimeout(() => setRefreshState('idle'), 5000);
+  }
 
   useEffect(() => {
     setOpen(false);
@@ -222,6 +259,25 @@ export function LiveShell({ children }: { children: React.ReactNode }) {
             <ThemeSwitcher />
             <LanguageSwitcher />
             <span className="live-chip">{t('app.liveData')}</span>
+            {canRefresh ? (
+              <button
+                className={`demo-btn sm ${refreshState === 'error' ? 'danger' : refreshState === 'done' ? 'primary' : ''}`}
+                type="button"
+                onClick={onUpstreamRefresh}
+                title={t('app.refreshTitle')}
+              >
+                <Icon name="trend-up" size={14} />
+                {refreshState === 'refreshing'
+                  ? t('app.refreshSyncing')
+                  : refreshState === 'done'
+                    ? t('app.refreshDone')
+                    : refreshState === 'otp'
+                      ? t('app.refreshOtp')
+                      : refreshState === 'error'
+                        ? t('app.refreshError')
+                        : t('app.refreshNow')}
+              </button>
+            ) : null}
             <button className="demo-icon-btn" aria-label="Notifications">
               <Icon name="bell" size={18} />
               <span className="demo-notify-dot" />

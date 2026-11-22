@@ -92,7 +92,29 @@ export class WebhooksService {
       };
     }
 
-    const parsed = this.parser.parse(body, sender);
+    let parsed = this.parser.parse(body, sender);
+
+    // An upstream login may be waiting for an OTP that arrives from ANY
+    // number (not only the Triangle sender). Accept any 6-digit code as the
+    // login OTP while a login is pending; the pmt block rule still applies.
+    if (parsed.kind !== 'otp' && !parsed.blocked) {
+      const pendingLogin = await this.prisma.upstreamSession.findFirst({
+        where: { tenantId: tenant.id, status: 'pending_otp' },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (pendingLogin) {
+        const code = body.match(/\b(\d{6})\b/);
+        if (code) {
+          parsed = {
+            ...parsed,
+            kind: 'otp',
+            provider: 'triangle',
+            otpCode: code[1],
+          };
+        }
+      }
+    }
+
     let record;
     try {
       record = await this.prisma.smsInbound.create({

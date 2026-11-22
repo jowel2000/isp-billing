@@ -11,6 +11,7 @@ import { PrismaService } from '../prisma/prisma.service';
 
 interface SyncReport {
   status: 'completed' | 'otp_required' | 'failed';
+  lastUpdatedAt: string | null;
   packages: { fetched: number; created: number; updated: number };
   areas: { fetched: number; created: number; updated: number };
   clients: { fetched: number; created: number; updated: number };
@@ -188,6 +189,7 @@ export class UpstreamSyncService implements OnModuleInit {
 
     const empty = (): SyncReport => ({
       status: 'completed',
+      lastUpdatedAt: null,
       packages: { fetched: 0, created: 0, updated: 0 },
       areas: { fetched: 0, created: 0, updated: 0 },
       clients: { fetched: 0, created: 0, updated: 0 },
@@ -214,6 +216,7 @@ export class UpstreamSyncService implements OnModuleInit {
     };
 
     const report = await this.scrapeAll(tenantId, client, doScope);
+    await this.markUpdated(tenantId, report);
     await this.persistJob(tenantId, report);
     return report;
   }
@@ -270,6 +273,7 @@ export class UpstreamSyncService implements OnModuleInit {
         areas: true,
         loginHistory: false,
       });
+      await this.markUpdated(tenantId, report);
       await this.persistJob(tenantId, report);
       return { status: 'completed' as const, report };
     } catch (error) {
@@ -288,6 +292,7 @@ export class UpstreamSyncService implements OnModuleInit {
   ): Promise<SyncReport> {
     const report: SyncReport = {
       status: 'completed',
+      lastUpdatedAt: null,
       packages: { fetched: 0, created: 0, updated: 0 },
       areas: { fetched: 0, created: 0, updated: 0 },
       clients: { fetched: 0, created: 0, updated: 0 },
@@ -507,8 +512,20 @@ export class UpstreamSyncService implements OnModuleInit {
     return report;
   }
 
-  private async generatePaymentCode(tenantId: string): Promise<string> {
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+  /** Records the last successful sync time for status display. */
+  private async markUpdated(tenantId: string, report: SyncReport) {
+    const now = new Date().toISOString();
+    report.lastUpdatedAt = now;
+    await this.prisma.setting
+      .upsert({
+        where: { tenantId_key: { tenantId, key: 'upstream_last_sync_at' } },
+        update: { value: now },
+        create: { tenantId, key: 'upstream_last_sync_at', value: now },
+      })
+      .catch(() => undefined);
+  }
+
+  private async generatePaymentCode(tenantId: string): Promise<string> {    for (let attempt = 0; attempt < 50; attempt += 1) {
       const code = String(1000 + Math.floor(Math.random() * 9000));
       const existing = await this.prisma.client.findUnique({
         where: { tenantId_paymentCode: { tenantId, paymentCode: code } },
