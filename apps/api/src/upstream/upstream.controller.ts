@@ -1,15 +1,19 @@
-import { Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import type { AuthUser } from '../auth/types/auth-user';
 import { UpstreamService } from './upstream.service';
+import { UpstreamSyncService } from './upstream-sync.service';
 
 @Controller('upstream')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class UpstreamController {
-  constructor(private readonly upstreamService: UpstreamService) {}
+  constructor(
+    private readonly upstreamService: UpstreamService,
+    private readonly syncService: UpstreamSyncService,
+  ) {}
 
   @Get('status')
   @RequirePermissions('upstream.manage')
@@ -21,5 +25,20 @@ export class UpstreamController {
   @RequirePermissions('upstream.manage')
   diagnose(@CurrentUser() user: AuthUser) {
     return this.upstreamService.diagnose(user.tenantId);
+  }
+
+  @Post('sync')
+  @RequirePermissions('upstream.manage')
+  sync(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      clients?: boolean;
+      packages?: boolean;
+      areas?: boolean;
+      loginHistory?: boolean;
+    },
+  ) {
+    return this.syncService.sync(user.tenantId, body ?? {});
   }
 }

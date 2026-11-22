@@ -215,6 +215,13 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 - The result is stored in the tenant settings (`upstream_diagnostic`) and an automation job trail — failures are never silent.
 - `GET /api/v1/upstream/status` shows the last diagnostic summary.
 
+## Upstream auto sync (scraping)
+
+- `POST /api/v1/upstream/sync` logs in to Triangle (reusing the stored session; OTP is taken from the forwarded SMS when required) and scrapes **packages, areas and clients** into the local database, plus optional per-client login history (`{ "loginHistory": true }`).
+- Existing records are updated by name/mobile/upstreamId; new clients get an auto 4-digit payment code and an active subscription when the package matches.
+- Every run stores an `AutomationJob` record with the full report — nothing fails silently.
+- Set `TRIANGLE_USERNAME` / `TRIANGLE_PASSWORD` in the environment, and `UPSTREAM_AUTO_SYNC=true` to auto-run the sync every 30 minutes.
+
 ## SMS forwarding & automated OTP
 
 - See `docs/sms-forwarding-setup.md` for the phone → server setup (endpoint, HMAC signature, replay protection).
