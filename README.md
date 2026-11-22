@@ -246,6 +246,14 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 - Staff sees only its own actions.
 - Logs are retained for **1 year** (365 days) and cleaned automatically.
 
+## Forgot password (OTP)
+
+- Login screen has a **Forgot password?** link that opens a 3-step flow: identifier → OTP → new password.
+- Endpoints: `POST /auth/forgot-password/request`, `/verify`, `/reset`.
+- OTPs are hashed (SHA-256) and stored in `OtpRequest` with a 5-minute expiry; a reset token (JWT, 10 min) is issued after verification and all refresh tokens are revoked when the password changes.
+- Until a real SMS gateway is connected the API returns the OTP in `devOtp` so the flow can be tested locally; a real SMS sender will replace this later.
+- Password hashing: bcrypt cost 12.
+
 ## SMS payment inbox (automated payments)
 
 An Android phone (SMS forwarder or custom app) forwards incoming payment SMS to:

@@ -618,6 +618,7 @@ model OtpRequest {
   respondedAt DateTime?
   expiresAt   DateTime?
   context     String?
+  codeHash    String?
   respondedBy String?
   responder   User? @relation("OtpResponder", fields: [respondedBy], references: [id])
 

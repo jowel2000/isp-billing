@@ -29,6 +29,7 @@ export type IconName =
   | 'sms'
   | 'alert'
   | 'eye'
+  | 'eye-off'
   | 'image'
   | 'sun'
   | 'moon';
@@ -217,6 +218,14 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
       <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  'eye-off': (
+    <>
+      <path d="m3 3 18 18" />
+      <path d="M10.6 5.2A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a18.4 18.4 0 0 1-3 3.6" />
+      <path d="M6.1 6.1C3.5 8 2 12 2 12s3.5 7 10 7a10.8 10.8 0 0 0 5.9-1.7" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
     </>
   ),
   image: (

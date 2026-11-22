@@ -70,6 +70,41 @@ export async function login(loginId: string, password: string): Promise<LoginRes
   });
 }
 
+export interface ForgotRequestResponse {
+  sent: boolean;
+  devOtp: string;
+  expiresIn: number;
+  note?: string;
+}
+
+export function forgotPasswordRequest(identifier: string) {
+  return request<ForgotRequestResponse>('/auth/forgot-password/request', {
+    method: 'POST',
+    body: JSON.stringify({ identifier }),
+  });
+}
+
+export function forgotPasswordVerify(identifier: string, otp: string) {
+  return request<{ verified: boolean; resetToken: string }>(
+    '/auth/forgot-password/verify',
+    {
+      method: 'POST',
+      body: JSON.stringify({ identifier, otp }),
+    },
+  );
+}
+
+export function forgotPasswordReset(
+  resetToken: string,
+  newPassword: string,
+  loginId?: string,
+) {
+  return request<{ success: boolean }>('/auth/forgot-password/reset', {
+    method: 'POST',
+    body: JSON.stringify({ resetToken, newPassword, loginId }),
+  });
+}
+
 export async function fetchMe(token: string): Promise<AuthUser> {
   return request<AuthUser>('/auth/me', { method: 'GET' }, token);
 }

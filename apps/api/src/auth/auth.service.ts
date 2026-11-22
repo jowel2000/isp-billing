@@ -1,4 +1,8 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import bcrypt from 'bcryptjs';
@@ -151,6 +155,144 @@ export class AuthService {
         data: { revokedAt: new Date() },
       });
     }
+    return { success: true };
+  }
+
+  /**
+   * Forgot password — step 1. Generates a 6-digit OTP and stores its hash.
+   * A real SMS gateway would deliver the OTP here; until then it is returned
+   * in the response so the flow can be tested locally.
+   */
+  async requestPasswordReset(identifier: string) {
+    const user = await this.prisma.user.findFirst({
+      where: {
+        OR: [{ loginId: identifier }, { mobile: identifier }],
+      },
+    });
+
+    if (!user) {
+      throw new BadRequestException('No account found with this Login ID or mobile');
+    }
+
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+    await this.prisma.otpRequest.create({
+      data: {
+        tenantId: user.tenantId,
+        context: identifier.trim().toLowerCase(),
+        codeHash: this.hashToken(otp),
+        expiresAt,
+      },
+    });
+
+    return {
+      sent: true,
+      devOtp: otp,
+      expiresIn: 300,
+      note: 'SMS gateway is not configured — OTP returned for local testing',
+    };
+  }
+
+  /** Forgot password — step 2. Verifies the OTP and issues a short reset token. */
+  async verifyPasswordReset(identifier: string, otp: string) {
+    const context = identifier.trim().toLowerCase();
+
+    const record = await this.prisma.otpRequest.findFirst({
+      where: {
+        context,
+        status: 'pending',
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { requestedAt: 'desc' },
+    });
+
+    if (!record || !record.codeHash || record.codeHash !== this.hashToken(otp)) {
+      throw new UnauthorizedException('OTP is incorrect or expired');
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: {
+        OR: [{ loginId: identifier }, { mobile: identifier }],
+      },
+    });
+    if (!user) {
+      throw new BadRequestException('No account found with this Login ID or mobile');
+    }
+
+    await this.prisma.otpRequest.update({
+      where: { id: record.id },
+      data: { status: 'responded', respondedAt: new Date(), respondedBy: user.id },
+    });
+
+    const resetToken = await this.jwt.signAsync(
+      { sub: user.id, type: 'reset' },
+      { secret: this.accessSecret, expiresIn: '10m' },
+    );
+
+    return { verified: true, resetToken };
+  }
+
+  /** Forgot password — step 3. Updates the password and revokes sessions. */
+  async resetPassword(resetToken: string, newPassword: string, loginId?: string) {
+    let payload: { sub?: string; type?: string };
+    try {
+      payload = await this.jwt.verifyAsync(resetToken, {
+        secret: this.accessSecret,
+      });
+    } catch {
+      throw new UnauthorizedException('Reset link is invalid or expired');
+    }
+
+    if (!payload || payload.type !== 'reset' || !payload.sub) {
+      throw new UnauthorizedException('Reset link is invalid');
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id: payload.sub } });
+    if (!user || user.status !== 'active') {
+      throw new UnauthorizedException('Account not found or inactive');
+    }
+
+    const nextLoginId = loginId?.trim() || user.loginId || '';
+    if (!nextLoginId) {
+      throw new BadRequestException('Login ID is required');
+    }
+
+    if (nextLoginId.toLowerCase() !== (user.loginId ?? '').toLowerCase()) {
+      const existing = await this.prisma.user.findUnique({
+        where: {
+          tenantId_loginId: { tenantId: user.tenantId, loginId: nextLoginId },
+        },
+      });
+      if (existing && existing.id !== user.id) {
+        throw new BadRequestException('This Login ID is already in use');
+      }
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { loginId: nextLoginId, passwordHash },
+    });
+
+    await this.prisma.refreshToken.updateMany({
+      where: { userId: user.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    await this.prisma.auditLog
+      .create({
+        data: {
+          tenantId: user.tenantId,
+          actorId: user.id,
+          action: 'auth.password_reset',
+          entityType: 'user',
+          entityId: user.id,
+        },
+      })
+      .catch(() => undefined);
+
     return { success: true };
   }
 
