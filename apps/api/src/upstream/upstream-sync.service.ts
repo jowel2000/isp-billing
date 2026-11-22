@@ -54,6 +54,8 @@ function toPaisa(value: unknown): bigint | null {
 export class UpstreamSyncService implements OnModuleInit {
   private readonly logger = new Logger('UpstreamSync');
   private autoTimer: NodeJS.Timeout | null = null;
+  private scheduledTimer: NodeJS.Timeout | null = null;
+  private readonly scheduledRunDates = new Map<string, string>();
   private readonly busy = new Set<string>();
 
   constructor(
@@ -63,6 +65,7 @@ export class UpstreamSyncService implements OnModuleInit {
 
   onModuleInit() {
     this.startAutoSyncIfEnabled();
+    this.startScheduledTimesSync();
   }
 
   private get credentials() {
@@ -647,5 +650,73 @@ export class UpstreamSyncService implements OnModuleInit {
     }, intervalMinutes * 60 * 1000);
 
     this.autoTimer.unref();
+  }
+
+  /**
+   * Runs upstream sync at fixed wall-clock times (e.g. 08:00 and 20:00).
+   * Configure with UPSTREAM_SYNC_TIMES="08:00,20:00". Times are interpreted in
+   * the process local timezone; if UPSTREAM_SYNC_TZ is set it is used for the
+   * comparison via Intl. Each time slot runs at most once per calendar day.
+   * This does not replace the interval-based scheduler above — both can run.
+   */
+  private startScheduledTimesSync() {
+    const raw = this.config.get<string>('UPSTREAM_SYNC_TIMES') || '';
+    const times = raw
+      .split(',')
+      .map((value) => value.trim())
+      .filter((value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value));
+
+    if (!times.length) return;
+    if (this.scheduledTimer) return;
+
+    const timeZone = this.config.get<string>('UPSTREAM_SYNC_TZ') || undefined;
+    const pad = (value: number) => String(value).padStart(2, '0');
+    const slotKey = (dateKey: string, time: string) => `${dateKey}@${time}`;
+
+    this.logger.log(`Upstream scheduled sync enabled — ${times.join(', ')} (${timeZone ?? 'local time'})`);
+
+    this.scheduledTimer = setInterval(async () => {
+      try {
+        const now = new Date();
+        const parts = new Intl.DateTimeFormat('en-GB', {
+          timeZone,
+          hour: '2-digit',
+          minute: '2-digit',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hourCycle: 'h23',
+        }).formatToParts(now);
+        const part = (type: string) => parts.find((item) => item.type === type)?.value ?? '';
+        const hhmm = `${part('hour')}:${part('minute')}`;
+        const dateKey = `${part('year')}-${part('month')}-${part('day')}`;
+
+        for (const time of times) {
+          if (hhmm !== time) continue;
+          const key = slotKey(dateKey, time);
+          if (this.scheduledRunDates.get(time) === key) continue;
+          this.scheduledRunDates.set(time, key);
+
+          const tenants = await this.prisma.tenant.findMany({
+            where: { status: 'active' },
+            select: { id: true },
+          });
+          for (const tenant of tenants) {
+            try {
+              const report = await this.sync(tenant.id);
+              this.logger.log(
+                `Scheduled sync ${time} for ${tenant.id}: ${report.status} (clients ${report.clients.fetched} fetched)`,
+              );
+            } catch (error) {
+              this.logger.warn(`Scheduled sync failed for ${tenant.id}: ${(error as Error).message}`);
+            }
+          }
+        }
+      } catch (error) {
+        this.logger.warn(`Scheduled sync tick failed: ${(error as Error).message}`);
+      }
+    }, 60_000);
+
+    this.scheduledTimer.unref();
   }
 }
