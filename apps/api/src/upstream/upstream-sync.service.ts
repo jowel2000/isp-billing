@@ -336,8 +336,11 @@ export class UpstreamSyncService implements OnModuleInit {
       return { status: 'completed' as const, report };
     } catch (error) {
       const message = (error as Error).message;
+      const status = (error as { status?: number })?.status ?? null;
+      const upstreamBody = (error as { body?: unknown })?.body ?? null;
 
-      // Persist the failure so it is visible without server logs.
+      // Persist the failure — including the upstream validation body — so the
+      // exact reason (e.g. a 422 field error) is visible without server logs.
       await this.prisma.automationJob
         .create({
           data: {
@@ -345,7 +348,12 @@ export class UpstreamSyncService implements OnModuleInit {
             type: 'upstream_otp_login',
             status: 'failed',
             lastError: message,
-            payload: JSON.stringify({ at: new Date().toISOString(), error: message }),
+            payload: JSON.stringify({
+              at: new Date().toISOString(),
+              error: message,
+              status,
+              body: upstreamBody,
+            }),
             finishedAt: new Date(),
           },
         })
