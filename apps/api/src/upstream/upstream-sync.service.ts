@@ -96,12 +96,49 @@ export class UpstreamSyncService implements OnModuleInit {
     return row?.value ? Number(row.value) : 0;
   }
 
+  /**
+   * Session payload envelope: cookies + the OTP challenge/browser tokens.
+   * Older rows stored plain cookies JSON — both shapes are accepted.
+   */
+  private parseSessionEnvelope(cookieEnc: string): {
+    cookies: Record<string, string>;
+    challengeToken: string | null;
+    browserToken: string | null;
+  } {
+    try {
+      const parsed = JSON.parse(decryptString(cookieEnc));
+      if (parsed && typeof parsed === 'object' && 'cookies' in parsed) {
+        return {
+          cookies: (parsed.cookies ?? {}) as Record<string, string>,
+          challengeToken: (parsed.challengeToken ?? null) as string | null,
+          browserToken: (parsed.browserToken ?? null) as string | null,
+        };
+      }
+      return {
+        cookies: (parsed ?? {}) as Record<string, string>,
+        challengeToken: null,
+        browserToken: null,
+      };
+    } catch {
+      return { cookies: {}, challengeToken: null, browserToken: null };
+    }
+  }
+
+  private sessionEnvelope(client: TriangleClient): string {
+    return encryptString(
+      JSON.stringify({
+        cookies: client.sessionCookies(),
+        challengeToken: client.getChallengeToken(),
+        browserToken: client.getBrowserToken(),
+      }),
+    );
+  }
+
   private async saveActiveSession(tenantId: string, client: TriangleClient) {
-    const cookies = encryptString(JSON.stringify(client.sessionCookies()));
     await this.prisma.upstreamSession.create({
       data: {
         tenantId,
-        cookieEnc: cookies,
+        cookieEnc: this.sessionEnvelope(client),
         status: 'active',
         lastVerifiedAt: new Date(),
       },
@@ -123,7 +160,9 @@ export class UpstreamSyncService implements OnModuleInit {
     });
     if (active?.cookieEnc) {
       try {
-        client.restoreSession(JSON.parse(decryptString(active.cookieEnc)));
+        const envelope = this.parseSessionEnvelope(active.cookieEnc);
+        client.restoreSession(envelope.cookies);
+        client.restoreOtpChallenge(envelope.challengeToken, envelope.browserToken);
         await client.getDashboard();
         await this.prisma.upstreamSession.update({
           where: { id: active.id },
@@ -160,7 +199,7 @@ export class UpstreamSyncService implements OnModuleInit {
       await this.prisma.upstreamSession.create({
         data: {
           tenantId,
-          cookieEnc: encryptString(JSON.stringify(client.sessionCookies())),
+          cookieEnc: this.sessionEnvelope(client),
           status: 'pending_otp',
         },
       });
@@ -248,21 +287,24 @@ export class UpstreamSyncService implements OnModuleInit {
         return { status: 'nothing_to_do' as const };
       }
 
-      // Single-use: consume the OTP before verifying.
+      const envelope = this.parseSessionEnvelope(pending.cookieEnc);
+      const client = this.newClient();
+      client.restoreSession(envelope.cookies);
+      client.restoreOtpChallenge(envelope.challengeToken, envelope.browserToken);
+
+      // Verify first; only consume the OTP after the upstream accepts it.
+      await client.verifyOtp(decryptString(otpRow.codeEnc));
+
       await this.prisma.otpRequest.update({
         where: { id: otpRow.id },
         data: { status: 'responded', respondedAt: new Date() },
       });
 
-      const client = this.newClient();
-      client.restoreSession(JSON.parse(decryptString(pending.cookieEnc)));
-      await client.verifyOtp(decryptString(otpRow.codeEnc));
-
       await this.prisma.upstreamSession.update({
         where: { id: pending.id },
         data: {
           status: 'active',
-          cookieEnc: encryptString(JSON.stringify(client.sessionCookies())),
+          cookieEnc: this.sessionEnvelope(client),
           lastVerifiedAt: new Date(),
         },
       });
@@ -275,10 +317,39 @@ export class UpstreamSyncService implements OnModuleInit {
       });
       await this.markUpdated(tenantId, report);
       await this.persistJob(tenantId, report);
+
+      await this.prisma.automationJob
+        .create({
+          data: {
+            tenantId,
+            type: 'upstream_otp_login',
+            status: 'completed',
+            payload: JSON.stringify({ at: new Date().toISOString(), report }),
+            finishedAt: new Date(),
+          },
+        })
+        .catch(() => undefined);
+
       return { status: 'completed' as const, report };
     } catch (error) {
-      this.logger.warn(`completeLoginAndSync failed: ${(error as Error).message}`);
-      return { status: 'failed' as const, error: (error as Error).message };
+      const message = (error as Error).message;
+
+      // Persist the failure so it is visible without server logs.
+      await this.prisma.automationJob
+        .create({
+          data: {
+            tenantId,
+            type: 'upstream_otp_login',
+            status: 'failed',
+            lastError: message,
+            payload: JSON.stringify({ at: new Date().toISOString(), error: message }),
+            finishedAt: new Date(),
+          },
+        })
+        .catch(() => undefined);
+
+      this.logger.warn(`completeLoginAndSync failed: ${message}`);
+      return { status: 'failed' as const, error: message };
     } finally {
       this.busy.delete(tenantId);
     }

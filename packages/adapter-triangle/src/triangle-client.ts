@@ -27,6 +27,9 @@ export class TriangleClient {
   private readonly jar = new CookieJar();
 
   private browserToken: string | null = null;
+  private challengeToken: string | null = null;
+  private username = '';
+  private password = '';
 
   constructor(options: TriangleClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -42,9 +45,18 @@ export class TriangleClient {
   }
 
   async login(username: string, password: string): Promise<LoginResult> {
+    this.username = username;
+    this.password = password;
+
     const { data, status, text } = await this.request('/api/v1/login', {
       method: 'POST',
-      body: JSON.stringify({ username, password, browser_token: this.browserToken }),
+      body: JSON.stringify({
+        username,
+        password,
+        browser_token: this.browserToken,
+        // The panel sends a challenge token back on repeated login attempts.
+        ...(this.challengeToken ? { challenge_token: this.challengeToken } : {}),
+      }),
     });
 
     if (status === 401) {
@@ -59,6 +71,9 @@ export class TriangleClient {
     const token = this.extractBrowserToken(data);
     if (token) this.browserToken = token;
 
+    const challenge = this.extractChallengeToken(data);
+    if (challenge) this.challengeToken = challenge;
+
     return {
       otpRequired,
       cookies: this.jar.toJSON(),
@@ -67,8 +82,9 @@ export class TriangleClient {
   }
 
   /**
-   * Verify the SMS OTP. The exact payload is captured during Phase 0;
-   * override `buildOtpPayload` if the upstream expects different fields.
+   * Verify the SMS OTP using the real panel contract:
+   *   { username, password, otp, browser_token, challenge_token }
+   * (discovered from the upstream panel's own JS bundle).
    */
   async verifyOtp(code: string): Promise<LoginResult> {
     const { data, status, text } = await this.request('/api/v1/verify-login-otp', {
@@ -89,6 +105,20 @@ export class TriangleClient {
 
   restoreSession(cookies: Record<string, string>): void {
     this.jar.load(cookies);
+  }
+
+  /** Restores the browser/challenge tokens captured during the login step. */
+  restoreOtpChallenge(challengeToken: string | null, browserToken: string | null): void {
+    this.challengeToken = challengeToken;
+    this.browserToken = browserToken;
+  }
+
+  getChallengeToken(): string | null {
+    return this.challengeToken;
+  }
+
+  getBrowserToken(): string | null {
+    return this.browserToken;
   }
 
   sessionCookies(): Record<string, string> {
@@ -125,8 +155,11 @@ export class TriangleClient {
 
   private buildOtpPayload(code: string): Record<string, unknown> {
     return {
+      username: this.username,
+      password: this.password,
       otp: code,
-      ...(this.browserToken ? { browser_token: this.browserToken } : {}),
+      browser_token: this.browserToken,
+      ...(this.challengeToken ? { challenge_token: this.challengeToken } : {}),
     };
   }
 
@@ -161,6 +194,19 @@ export class TriangleClient {
     const payload = record.payload;
     if (payload && typeof payload === 'object') {
       const token = (payload as Record<string, unknown>).browser_token;
+      if (typeof token === 'string') return token;
+    }
+    return null;
+  }
+
+  private extractChallengeToken(data: unknown): string | null {
+    if (!data || typeof data !== 'object') return null;
+    const record = data as Record<string, unknown>;
+    if (typeof record.challenge_token === 'string') return record.challenge_token;
+
+    const payload = record.payload;
+    if (payload && typeof payload === 'object') {
+      const token = (payload as Record<string, unknown>).challenge_token;
       if (typeof token === 'string') return token;
     }
     return null;
