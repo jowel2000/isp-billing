@@ -10,14 +10,17 @@ import { decryptString, encryptString } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
 interface SyncReport {
+  status: 'completed' | 'otp_required' | 'failed';
   packages: { fetched: number; created: number; updated: number };
   areas: { fetched: number; created: number; updated: number };
   clients: { fetched: number; created: number; updated: number };
   loginHistory: { fetched: number; created: number };
   errors: string[];
+  note?: string;
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const LOGIN_COOLDOWN_MS = 10 * 60 * 1000;
+const PENDING_OTP_TTL_MS = 5 * 60 * 1000;
 
 function asList(payload: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(payload)) return payload as Array<Record<string, unknown>>;
@@ -43,7 +46,6 @@ function toPaisa(value: unknown): bigint | null {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   if (!Number.isFinite(number)) return null;
-  // Prices from the panel are in taka; store paisa.
   return BigInt(Math.round(number * 100));
 }
 
@@ -51,6 +53,7 @@ function toPaisa(value: unknown): bigint | null {
 export class UpstreamSyncService implements OnModuleInit {
   private readonly logger = new Logger('UpstreamSync');
   private autoTimer: NodeJS.Timeout | null = null;
+  private readonly busy = new Set<string>();
 
   constructor(
     private readonly config: ConfigService,
@@ -69,119 +72,137 @@ export class UpstreamSyncService implements OnModuleInit {
     };
   }
 
-  private async waitForOtp(tenantId: string, timeoutMs: number): Promise<string | null> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const row = await this.prisma.otpRequest.findFirst({
-        where: {
-          tenantId,
-          context: 'triangle_login',
-          status: 'pending',
-          expiresAt: { gt: new Date() },
-        },
-        orderBy: { requestedAt: 'desc' },
-        select: { id: true, codeEnc: true },
-      });
-      if (row?.codeEnc) {
-        // Single-use: mark consumed before returning.
-        await this.prisma.otpRequest.update({
-          where: { id: row.id },
-          data: { status: 'responded', respondedAt: new Date() },
-        });
-        return decryptString(row.codeEnc);
-      }
-      await sleep(3000);
-    }
-    return null;
+  private newClient(): TriangleClient {
+    return new TriangleClient({
+      baseUrl: this.credentials.baseUrl,
+      requestsPerMinute: 15,
+      timeoutMs: 25_000,
+    });
   }
 
-  private async ensureSession(client: TriangleClient, tenantId: string) {
-    const session = await this.prisma.upstreamSession.findFirst({
-      where: { tenantId, status: 'active' },
-      orderBy: { createdAt: 'desc' },
+  private async rememberLoginAttempt(tenantId: string) {
+    await this.prisma.setting.upsert({
+      where: { tenantId_key: { tenantId, key: 'upstream_last_login_attempt' } },
+      update: { value: String(Date.now()) },
+      create: { tenantId, key: 'upstream_last_login_attempt', value: String(Date.now()) },
     });
+  }
 
-    if (session?.cookieEnc) {
-      try {
-        client.restoreSession(JSON.parse(decryptString(session.cookieEnc)));
-        // Cheap check: the dashboard call throws SessionExpiredError on 401.
-        await client.getDashboard();
-        await this.prisma.upstreamSession.update({
-          where: { id: session.id },
-          data: { lastVerifiedAt: new Date() },
-        });
-        return true;
-      } catch {
-        // Session expired — fall through and log in again.
-      }
-    }
+  private async lastLoginAttemptAt(tenantId: string): Promise<number> {
+    const row = await this.prisma.setting.findUnique({
+      where: { tenantId_key: { tenantId, key: 'upstream_last_login_attempt' } },
+    });
+    return row?.value ? Number(row.value) : 0;
+  }
 
-    const { username, password } = this.credentials;
-    const login = await client.login(username, password);
-
-    if (login.otpRequired) {
-      const otp = await this.waitForOtp(tenantId, 120_000);
-      if (!otp) {
-        throw new BadRequestException(
-          'Triangle asked for an OTP but none arrived via the SMS webhook. Forward the phone SMS and retry.',
-        );
-      }
-      await client.verifyOtp(otp);
-    }
-
-    await this.prisma.upstreamSession.upsert({
-      where: { id: session?.id ?? 'new-session' },
-      update: {
-        cookieEnc: encryptString(JSON.stringify(client.sessionCookies())),
-        status: 'active',
-        lastVerifiedAt: new Date(),
-      },
-      create: {
+  private async saveActiveSession(tenantId: string, client: TriangleClient) {
+    const cookies = encryptString(JSON.stringify(client.sessionCookies()));
+    await this.prisma.upstreamSession.create({
+      data: {
         tenantId,
-        cookieEnc: encryptString(JSON.stringify(client.sessionCookies())),
+        cookieEnc: cookies,
         status: 'active',
         lastVerifiedAt: new Date(),
       },
     });
-
-    return true;
   }
 
   /**
-   * Full upstream sync: packages, areas, clients (+ client login history).
-   * Uses the stored session when possible; otherwise logs in (OTP via the
-   * SMS webhook) before scraping.
+   * Returns 'ok' when a working session is ready, or 'otp_required' when the
+   * login needs an SMS OTP (without spamming new logins).
+   */
+  private async ensureSession(
+    tenantId: string,
+    client: TriangleClient,
+  ): Promise<'ok' | 'otp_required'> {
+    // 1. Reuse the last active session.
+    const active = await this.prisma.upstreamSession.findFirst({
+      where: { tenantId, status: 'active' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (active?.cookieEnc) {
+      try {
+        client.restoreSession(JSON.parse(decryptString(active.cookieEnc)));
+        await client.getDashboard();
+        await this.prisma.upstreamSession.update({
+          where: { id: active.id },
+          data: { lastVerifiedAt: new Date() },
+        });
+        return 'ok';
+      } catch {
+        // Session expired — fall through.
+      }
+    }
+
+    // 2. An OTP was already requested and is still fresh: wait for the SMS
+    //    instead of requesting another one.
+    const pending = await this.prisma.upstreamSession.findFirst({
+      where: { tenantId, status: 'pending_otp' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (pending && Date.now() - pending.createdAt.getTime() < PENDING_OTP_TTL_MS) {
+      return 'otp_required';
+    }
+
+    // 3. Cooldown: never attempt a fresh login more often than every 10 min.
+    const lastAttempt = await this.lastLoginAttemptAt(tenantId);
+    if (lastAttempt && Date.now() - lastAttempt < LOGIN_COOLDOWN_MS) {
+      return 'otp_required';
+    }
+
+    // 4. Fresh login attempt (this triggers ONE OTP SMS from Triangle).
+    const { username, password } = this.credentials;
+    const login = await client.login(username, password);
+    await this.rememberLoginAttempt(tenantId);
+
+    if (login.otpRequired) {
+      await this.prisma.upstreamSession.create({
+        data: {
+          tenantId,
+          cookieEnc: encryptString(JSON.stringify(client.sessionCookies())),
+          status: 'pending_otp',
+        },
+      });
+      return 'otp_required';
+    }
+
+    await this.saveActiveSession(tenantId, client);
+    return 'ok';
+  }
+
+  /**
+   * Manual/auto sync entry point. Fast: when an OTP is required it returns
+   * immediately — the forwarded SMS completes the flow via
+   * `completeLoginAndSync`.
    */
   async sync(
     tenantId: string,
     scope: { clients?: boolean; packages?: boolean; areas?: boolean; loginHistory?: boolean } = {},
   ): Promise<SyncReport> {
-    const { baseUrl, username, password } = this.credentials;
+    const { username, password } = this.credentials;
     if (!username || !password) {
       throw new BadRequestException(
         'TRIANGLE_USERNAME / TRIANGLE_PASSWORD are not configured — set them in the environment',
       );
     }
 
-    const report: SyncReport = {
+    const empty = (): SyncReport => ({
+      status: 'completed',
       packages: { fetched: 0, created: 0, updated: 0 },
       areas: { fetched: 0, created: 0, updated: 0 },
       clients: { fetched: 0, created: 0, updated: 0 },
       loginHistory: { fetched: 0, created: 0 },
       errors: [],
-    };
-
-    const client = new TriangleClient({
-      baseUrl,
-      requestsPerMinute: 15,
-      timeoutMs: 25_000,
     });
 
-    try {
-      await this.ensureSession(client, tenantId);
-    } catch (error) {
-      report.errors.push(`login failed: ${(error as Error).message}`);
-      await this.persistJob(tenantId, report);
+    const client = this.newClient();
+    const state = await this.ensureSession(tenantId, client);
+
+    if (state !== 'ok') {
+      const report = empty();
+      report.status = 'otp_required';
+      report.note =
+        'OTP requested — when the forwarded SMS arrives the sync completes automatically. New logins are rate-limited to avoid SMS spam.';
       return report;
     }
 
@@ -192,7 +213,89 @@ export class UpstreamSyncService implements OnModuleInit {
       loginHistory: scope.loginHistory ?? false,
     };
 
-    if (doScope.packages) {
+    const report = await this.scrapeAll(tenantId, client, doScope);
+    await this.persistJob(tenantId, report);
+    return report;
+  }
+
+  /**
+   * Called when a forwarded SMS contains an OTP: verifies it with Triangle,
+   * saves the session and immediately scrapes + updates all data.
+   */
+  async completeLoginAndSync(tenantId: string) {
+    if (this.busy.has(tenantId)) return { status: 'busy' as const };
+    this.busy.add(tenantId);
+    try {
+      const pending = await this.prisma.upstreamSession.findFirst({
+        where: { tenantId, status: 'pending_otp' },
+        orderBy: { createdAt: 'desc' },
+      });
+      const otpRow = await this.prisma.otpRequest.findFirst({
+        where: {
+          tenantId,
+          context: 'triangle_login',
+          status: 'pending',
+          expiresAt: { gt: new Date() },
+        },
+        orderBy: { requestedAt: 'desc' },
+        select: { id: true, codeEnc: true },
+      });
+
+      if (!pending?.cookieEnc || !otpRow?.codeEnc) {
+        return { status: 'nothing_to_do' as const };
+      }
+
+      // Single-use: consume the OTP before verifying.
+      await this.prisma.otpRequest.update({
+        where: { id: otpRow.id },
+        data: { status: 'responded', respondedAt: new Date() },
+      });
+
+      const client = this.newClient();
+      client.restoreSession(JSON.parse(decryptString(pending.cookieEnc)));
+      await client.verifyOtp(decryptString(otpRow.codeEnc));
+
+      await this.prisma.upstreamSession.update({
+        where: { id: pending.id },
+        data: {
+          status: 'active',
+          cookieEnc: encryptString(JSON.stringify(client.sessionCookies())),
+          lastVerifiedAt: new Date(),
+        },
+      });
+
+      const report = await this.scrapeAll(tenantId, client, {
+        clients: true,
+        packages: true,
+        areas: true,
+        loginHistory: false,
+      });
+      await this.persistJob(tenantId, report);
+      return { status: 'completed' as const, report };
+    } catch (error) {
+      this.logger.warn(`completeLoginAndSync failed: ${(error as Error).message}`);
+      return { status: 'failed' as const, error: (error as Error).message };
+    } finally {
+      this.busy.delete(tenantId);
+    }
+  }
+
+  /** Scrapes packages, areas, clients (+ optional login history). */
+  private async scrapeAll(
+    tenantId: string,
+    client: TriangleClient,
+    scope: { clients: boolean; packages: boolean; areas: boolean; loginHistory: boolean },
+  ): Promise<SyncReport> {
+    const report: SyncReport = {
+      status: 'completed',
+      packages: { fetched: 0, created: 0, updated: 0 },
+      areas: { fetched: 0, created: 0, updated: 0 },
+      clients: { fetched: 0, created: 0, updated: 0 },
+      loginHistory: { fetched: 0, created: 0 },
+      errors: [],
+    };
+
+    if (scope.packages) {
       try {
         const list = asList(await client.getPackages());
         report.packages.fetched = list.length;
@@ -236,7 +339,7 @@ export class UpstreamSyncService implements OnModuleInit {
       }
     }
 
-    if (doScope.areas) {
+    if (scope.areas) {
       try {
         const list = asList(await client.getAreas());
         report.areas.fetched = list.length;
@@ -275,15 +378,10 @@ export class UpstreamSyncService implements OnModuleInit {
       }
     }
 
-    if (doScope.clients) {
+    if (scope.clients) {
       try {
         const list = asList(await client.getClients());
         report.clients.fetched = list.length;
-
-        const tenant = await this.prisma.tenant.findFirst({
-          where: { id: tenantId },
-          select: { code: true },
-        });
 
         for (const item of list) {
           const upstreamId = str(item.id ?? item.uid ?? item.client_id);
@@ -367,7 +465,7 @@ export class UpstreamSyncService implements OnModuleInit {
             report.clients.created += 1;
           }
 
-          if (doScope.loginHistory && upstreamId) {
+          if (scope.loginHistory && upstreamId) {
             try {
               const history = asList(await client.getLoginHistory(upstreamId));
               report.loginHistory.fetched += history.length;
@@ -406,7 +504,6 @@ export class UpstreamSyncService implements OnModuleInit {
       }
     }
 
-    await this.persistJob(tenantId, report);
     return report;
   }
 

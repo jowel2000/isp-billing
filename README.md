@@ -217,7 +217,9 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 
 ## Upstream auto sync (scraping)
 
-- `POST /api/v1/upstream/sync` logs in to Triangle (reusing the stored session; OTP is taken from the forwarded SMS when required) and scrapes **packages, areas and clients** into the local database, plus optional per-client login history (`{ "loginHistory": true }`).
+- `POST /api/v1/upstream/sync` logs in to Triangle and scrapes **packages, areas and clients** into the local database, plus optional per-client login history (`{ "loginHistory": true }`).
+- When Triangle requires an OTP, the sync returns immediately with `status: "otp_required"` — the SMS forwarded from the phone automatically completes the flow (verify OTP → save session → scrape → update data). No more long HTTP waits.
+- Login attempts are rate-limited (10-minute cooldown) so repeated sync runs never spam OTP SMS to the phone.
 - Existing records are updated by name/mobile/upstreamId; new clients get an auto 4-digit payment code and an active subscription when the package matches.
 - Every run stores an `AutomationJob` record with the full report — nothing fails silently.
 - Set `TRIANGLE_USERNAME` / `TRIANGLE_PASSWORD` in the environment, and `UPSTREAM_AUTO_SYNC=true` to auto-run the sync on an interval (default 30 minutes, configurable with `UPSTREAM_AUTO_SYNC_INTERVAL_MINUTES`, minimum 1).

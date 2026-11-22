@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -8,6 +9,7 @@ import { createHash, createHmac } from 'node:crypto';
 import type { AuthUser } from '../auth/types/auth-user';
 import { encryptString } from '../common/crypto';
 import { OtpStore } from '../upstream/otp.store';
+import { UpstreamSyncService } from '../upstream/upstream-sync.service';
 import { PaymentsService } from '../payments/payments.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SmsWebhookDto } from './dto/sms-webhook.dto';
@@ -15,11 +17,14 @@ import { ParsedSms, SmsParserService } from './sms-parser.service';
 
 @Injectable()
 export class WebhooksService {
+  private readonly logger = new Logger('Webhooks');
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly parser: SmsParserService,
     private readonly otpStore: OtpStore,
     private readonly payments: PaymentsService,
+    private readonly upstreamSync: UpstreamSyncService,
   ) {}
 
   assertSecret(secret: string | undefined) {
@@ -141,6 +146,12 @@ export class WebhooksService {
           expiresAt,
         },
       });
+
+      // The forwarded OTP completes the pending upstream login automatically:
+      // verify OTP → save session → scrape → update local data.
+      void this.upstreamSync
+        .completeLoginAndSync(tenant.id)
+        .catch((error) => this.logger.warn(`OTP login completion failed: ${error.message}`));
 
       await this.prisma.smsInbound.update({
         where: { id: record.id },

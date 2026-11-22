@@ -8,6 +8,6 @@ import { UpstreamSyncService } from './upstream-sync.service';
 @Module({
   controllers: [UpstreamController, UpstreamOtpController],
   providers: [UpstreamService, UpstreamSyncService, OtpStore],
-  exports: [OtpStore],
+  exports: [OtpStore, UpstreamSyncService],
 })
 export class UpstreamModule {}
