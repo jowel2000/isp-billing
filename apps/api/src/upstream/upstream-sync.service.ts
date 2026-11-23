@@ -43,6 +43,48 @@ function str(value: unknown): string {
   return value === null || value === undefined ? '' : String(value).trim();
 }
 
+/**
+ * Extracts rows + pagination from the upstream response shapes:
+ *   { payload: { data: [...] } }
+ *   { payload: { data: { data: [...], total, last_page } } }
+ */
+function extractList(payload: unknown): {
+  rows: Array<Record<string, unknown>>;
+  lastPage: number;
+} {
+  const root = (payload ?? {}) as Record<string, any>;
+  const candidates = [
+    root?.payload?.data?.data,
+    root?.payload?.data,
+    root?.data?.data,
+    root?.data,
+    root?.payload?.items,
+    root?.items,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      const innerMeta = root?.payload?.data;
+      const meta =
+        innerMeta &&
+        typeof innerMeta === 'object' &&
+        !Array.isArray(innerMeta) &&
+        (innerMeta.total !== undefined || innerMeta.last_page !== undefined)
+          ? innerMeta
+          : (root?.payload ?? root?.data ?? root ?? {});
+      const total = Number(meta?.total ?? 0) || 0;
+      const perPage = Number(meta?.per_page ?? 0) || 100;
+      const lastPage =
+        Number(meta?.last_page ?? 0) ||
+        (total > 0 ? Math.ceil(total / perPage) : 1) ||
+        1;
+      return { rows: candidate as Array<Record<string, unknown>>, lastPage };
+    }
+  }
+
+  return { rows: [], lastPage: 1 };
+}
+
 function toPaisa(value: unknown): bigint | null {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
@@ -107,6 +149,8 @@ export class UpstreamSyncService implements OnModuleInit {
     cookies: Record<string, string>;
     challengeToken: string | null;
     browserToken: string | null;
+    accessToken: string | null;
+    refreshToken: string | null;
   } {
     try {
       const parsed = JSON.parse(decryptString(cookieEnc));
@@ -115,15 +159,25 @@ export class UpstreamSyncService implements OnModuleInit {
           cookies: (parsed.cookies ?? {}) as Record<string, string>,
           challengeToken: (parsed.challengeToken ?? null) as string | null,
           browserToken: (parsed.browserToken ?? null) as string | null,
+          accessToken: (parsed.accessToken ?? null) as string | null,
+          refreshToken: (parsed.refreshToken ?? null) as string | null,
         };
       }
       return {
         cookies: (parsed ?? {}) as Record<string, string>,
         challengeToken: null,
         browserToken: null,
+        accessToken: null,
+        refreshToken: null,
       };
     } catch {
-      return { cookies: {}, challengeToken: null, browserToken: null };
+      return {
+        cookies: {},
+        challengeToken: null,
+        browserToken: null,
+        accessToken: null,
+        refreshToken: null,
+      };
     }
   }
 
@@ -133,6 +187,8 @@ export class UpstreamSyncService implements OnModuleInit {
         cookies: client.sessionCookies(),
         challengeToken: client.getChallengeToken(),
         browserToken: client.getBrowserToken(),
+        accessToken: client.getAccessToken(),
+        refreshToken: client.getRefreshToken(),
       }),
     );
   }
@@ -156,6 +212,18 @@ export class UpstreamSyncService implements OnModuleInit {
     tenantId: string,
     client: TriangleClient,
   ): Promise<'ok' | 'otp_required'> {
+    // Expire stale pending sessions (older than 7 days) so they do not pile up.
+    await this.prisma.upstreamSession
+      .updateMany({
+        where: {
+          tenantId,
+          status: 'pending_otp',
+          createdAt: { lt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+        },
+        data: { status: 'expired' },
+      })
+      .catch(() => undefined);
+
     // 1. Reuse the last active session.
     const active = await this.prisma.upstreamSession.findFirst({
       where: { tenantId, status: 'active' },
@@ -166,6 +234,7 @@ export class UpstreamSyncService implements OnModuleInit {
         const envelope = this.parseSessionEnvelope(active.cookieEnc);
         client.restoreSession(envelope.cookies);
         client.restoreOtpChallenge(envelope.challengeToken, envelope.browserToken);
+        client.restoreAuthTokens(envelope.accessToken, envelope.refreshToken);
         await client.getDashboard();
         await this.prisma.upstreamSession.update({
           where: { id: active.id },
@@ -294,6 +363,10 @@ export class UpstreamSyncService implements OnModuleInit {
       const client = this.newClient();
       client.restoreSession(envelope.cookies);
       client.restoreOtpChallenge(envelope.challengeToken, envelope.browserToken);
+      client.restoreAuthTokens(envelope.accessToken, envelope.refreshToken);
+      // The verify payload requires the original credentials — without these
+      // the upstream returns 422 "username/password required".
+      client.restoreCredentials(this.credentials.username, this.credentials.password);
 
       // Verify first; only consume the OTP after the upstream accepts it.
       await client.verifyOtp(decryptString(otpRow.codeEnc));
@@ -384,14 +457,22 @@ export class UpstreamSyncService implements OnModuleInit {
 
     if (scope.packages) {
       try {
-        const list = asList(await client.getPackages());
+        const { rows: list } = extractList(await client.getSetupPackages());
         report.packages.fetched = list.length;
         for (const item of list) {
-          const name = str(item.name ?? item.package_name ?? item.title);
+          const name = str(item.package_name ?? item.name ?? item.title);
           if (!name) continue;
           const upstreamId = str(item.id ?? item.uid);
-          const price = toPaisa(item.price ?? item.monthly_price ?? item.amount ?? item.rate);
-          const speed = Number(item.speed ?? item.speed_mbps ?? item.bandwidth) || null;
+          const price = toPaisa(
+            item.r_triangle_price ??
+              item.package_base_price ??
+              item.price ??
+              item.monthly_price ??
+              item.amount ??
+              item.rate,
+          );
+          const speed =
+            Number(item.bandwidth ?? item.speed ?? item.speed_mbps) || null;
 
           const existing = await this.prisma.package.findFirst({
             where: { tenantId, name },
@@ -428,11 +509,26 @@ export class UpstreamSyncService implements OnModuleInit {
 
     if (scope.areas) {
       try {
-        const list = asList(await client.getAreas());
-        report.areas.fetched = list.length;
-        for (const item of list) {
-          const name = str(item.name ?? item.area_name ?? item.title);
+        const rows: Array<Record<string, unknown>> = [];
+        let page = 1;
+        let lastPage = 1;
+        do {
+          const { rows: batch, lastPage: lp } = extractList(
+            await client.getSetupAreas({ page, per_page: 100 }),
+          );
+          rows.push(...batch);
+          lastPage = lp;
+          page += 1;
+        } while (page <= Math.min(lastPage, 100));
+
+        report.areas.fetched = rows.length;
+        for (const item of rows) {
+          const name = str(item.area_name ?? item.name ?? item.title);
           if (!name) continue;
+          const upstreamId = str(item.id ?? item.uid);
+          const district = str(item.district_name ?? item.district);
+          const thana = str(item.upazila_name ?? item.thana_name ?? item.thana ?? item.thane);
+
           const existing = await this.prisma.area.findFirst({
             where: { tenantId, name },
             select: { id: true },
@@ -441,9 +537,9 @@ export class UpstreamSyncService implements OnModuleInit {
             await this.prisma.area.update({
               where: { id: existing.id },
               data: {
-                upstreamId: str(item.id ?? item.uid) || undefined,
-                district: str(item.district) || undefined,
-                thana: str(item.thana ?? item.thane) || undefined,
+                upstreamId: upstreamId || undefined,
+                district: district || undefined,
+                thana: thana || undefined,
               },
             });
             report.areas.updated += 1;
@@ -452,9 +548,9 @@ export class UpstreamSyncService implements OnModuleInit {
               data: {
                 tenantId,
                 name,
-                upstreamId: str(item.id ?? item.uid) || null,
-                district: str(item.district) || null,
-                thana: str(item.thana ?? item.thane) || null,
+                upstreamId: upstreamId || null,
+                district: district || null,
+                thana: thana || null,
               },
             });
             report.areas.created += 1;
@@ -467,125 +563,201 @@ export class UpstreamSyncService implements OnModuleInit {
 
     if (scope.clients) {
       try {
-        const list = asList(await client.getClients());
-        report.clients.fetched = list.length;
+        let page = 1;
+        let lastPage = 1;
+        let fetched = 0;
 
-        for (const item of list) {
-          const upstreamId = str(item.id ?? item.uid ?? item.client_id);
-          const name = str(item.name ?? item.full_name ?? item.username) || 'Unknown';
-          const mobile = str(item.mobile ?? item.phone ?? item.phone_number);
-          const pppoe = str(item.pppoe_username ?? item.username ?? item.pppoe);
-          const ipAddress = str(item.ip ?? item.ip_address);
-          const areaName = str(item.area ?? item.area_name);
-          const packageName = str(item.package ?? item.package_name ?? item.plan);
+        do {
+          const { rows: list, lastPage: lp } = extractList(
+            await client.getClients({ page, per_page: 100 }),
+          );
+          lastPage = lp;
+          fetched += list.length;
 
-          const area = areaName
-            ? await this.prisma.area.findFirst({ where: { tenantId, name: areaName }, select: { id: true } })
-            : null;
-          const pkg = packageName
-            ? await this.prisma.package.findFirst({ where: { tenantId, name: packageName }, select: { id: true } })
-            : null;
+          for (const item of list) {
+            const upstreamId = str(item.id ?? item.uid ?? item.client_id);
+            const name =
+              str(item.contact_name ?? item.PPPOE_username ?? item.name ?? item.username) ||
+              'Unknown';
+            const mobile = str(
+              item.client_mobile ?? item.mobile ?? item.phone ?? item.phone_number,
+            );
+            const pppoe = str(
+              item.PPPOE_username ?? item.pppoe_username ?? item.username ?? item.pppoe,
+            );
+            const ipAddress = str(item.ip ?? item.ip_address ?? item.client_ip);
+            const areaName = str(item.area_name ?? item.area);
+            const packageName = str(item.package_name ?? item.package ?? item.plan);
 
-          const existing = await this.prisma.client.findFirst({
-            where: { tenantId, OR: [{ upstreamId: upstreamId || '__none__' }, { mobile: mobile || '__none__' }] },
-            select: { id: true, upstreamId: true },
-          });
+            const rawStatus = Number(item.client_status ?? 0);
+            const mappedStatus =
+              rawStatus === 1
+                ? 'active'
+                : rawStatus === 2
+                  ? 'inactive'
+                  : rawStatus > 2
+                    ? 'expired'
+                    : null;
 
-          if (existing) {
-            await this.prisma.client.update({
-              where: { id: existing.id },
-              data: {
-                name,
-                ...(mobile ? { mobile } : {}),
-                upstreamId: upstreamId || existing.upstreamId,
-                ...(pppoe ? { pppoeUsername: pppoe } : {}),
-                ...(ipAddress ? { ipAddress } : {}),
-                ...(area ? { areaId: area.id } : {}),
-              },
-            });
-            report.clients.updated += 1;
-          } else {
-            const paymentCode = await this.generatePaymentCode(tenantId);
-            const created = await this.prisma.client.create({
-              data: {
-                tenantId,
-                publicId: `TRG-SYNC-${Date.now()}-${Math.floor(Math.random() * 9999)}`,
-                paymentCode,
-                upstreamId: upstreamId || null,
-                name,
-                mobile: mobile || '01---------',
-                areaId: area?.id ?? null,
-                pppoeUsername: pppoe || null,
-                ipAddress: ipAddress || null,
-              },
-              select: { id: true },
-            });
+            const expireRaw = str(item.expire_date ?? item.expiry_date);
+            const expireAt =
+              expireRaw && !Number.isNaN(new Date(expireRaw).getTime())
+                ? new Date(expireRaw)
+                : null;
 
-            await this.prisma.upstreamEntityMap.upsert({
+            const area = areaName
+              ? await this.prisma.area.findFirst({
+                  where: { tenantId, name: areaName },
+                  select: { id: true },
+                })
+              : null;
+            const pkg = packageName
+              ? await this.prisma.package.findFirst({
+                  where: { tenantId, name: packageName },
+                  select: { id: true },
+                })
+              : null;
+
+            const existing = await this.prisma.client.findFirst({
               where: {
-                tenantId_entityType_upstreamId: {
+                tenantId,
+                OR: [
+                  { upstreamId: upstreamId || '__none__' },
+                  { mobile: mobile || '__none__' },
+                ],
+              },
+              select: { id: true, upstreamId: true },
+            });
+
+            if (existing) {
+              await this.prisma.client.update({
+                where: { id: existing.id },
+                data: {
+                  name,
+                  ...(mobile ? { mobile } : {}),
+                  upstreamId: upstreamId || existing.upstreamId,
+                  ...(pppoe ? { pppoeUsername: pppoe } : {}),
+                  ...(ipAddress ? { ipAddress } : {}),
+                  ...(area ? { areaId: area.id } : {}),
+                  ...(mappedStatus ? { status: mappedStatus } : {}),
+                },
+              });
+
+              if (pkg) {
+                const subscription = await this.prisma.subscription.findFirst({
+                  where: { clientId: existing.id, status: 'active' },
+                  select: { id: true },
+                });
+                if (subscription) {
+                  if (expireAt) {
+                    await this.prisma.subscription.update({
+                      where: { id: subscription.id },
+                      data: { expireAt },
+                    });
+                  }
+                } else {
+                  await this.prisma.subscription.create({
+                    data: {
+                      clientId: existing.id,
+                      packageId: pkg.id,
+                      startAt: new Date(),
+                      expireAt,
+                      status: 'active',
+                    },
+                  });
+                }
+              }
+
+              report.clients.updated += 1;
+            } else {
+              const paymentCode = await this.generatePaymentCode(tenantId);
+              const created = await this.prisma.client.create({
+                data: {
+                  tenantId,
+                  publicId: `TRG-SYNC-${Date.now()}-${Math.floor(Math.random() * 9999)}`,
+                  paymentCode,
+                  upstreamId: upstreamId || null,
+                  name,
+                  mobile: mobile || '01---------',
+                  areaId: area?.id ?? null,
+                  pppoeUsername: pppoe || null,
+                  ipAddress: ipAddress || null,
+                  status: mappedStatus ?? 'active',
+                },
+                select: { id: true },
+              });
+
+              await this.prisma.upstreamEntityMap.upsert({
+                where: {
+                  tenantId_entityType_upstreamId: {
+                    tenantId,
+                    entityType: 'client',
+                    upstreamId: upstreamId || created.id,
+                  },
+                },
+                update: { localId: created.id },
+                create: {
                   tenantId,
                   entityType: 'client',
                   upstreamId: upstreamId || created.id,
-                },
-              },
-              update: { localId: created.id },
-              create: {
-                tenantId,
-                entityType: 'client',
-                upstreamId: upstreamId || created.id,
-                localId: created.id,
-              },
-            });
-
-            if (pkg) {
-              await this.prisma.subscription.create({
-                data: {
-                  clientId: created.id,
-                  packageId: pkg.id,
-                  startAt: new Date(),
-                  status: 'active',
+                  localId: created.id,
                 },
               });
+
+              if (pkg) {
+                await this.prisma.subscription.create({
+                  data: {
+                    clientId: created.id,
+                    packageId: pkg.id,
+                    startAt: new Date(),
+                    expireAt,
+                    status: 'active',
+                  },
+                });
+              }
+
+              report.clients.created += 1;
             }
 
-            report.clients.created += 1;
-          }
-
-          if (scope.loginHistory && upstreamId) {
-            try {
-              const history = asList(await client.getLoginHistory(upstreamId));
-              report.loginHistory.fetched += history.length;
-              const local = await this.prisma.client.findFirst({
-                where: { tenantId, upstreamId },
-                select: { id: true },
-              });
-              if (local) {
-                for (const entry of history) {
-                  const loginAt = new Date(
-                    str(entry.login_at ?? entry.timestamp ?? entry.time) || Date.now(),
-                  );
-                  if (!Number.isNaN(loginAt.getTime())) {
-                    await this.prisma.loginHistory
-                      .create({
-                        data: {
-                          tenantId,
-                          clientId: local.id,
-                          upstreamId,
-                          loginAt,
-                          ip: str(entry.ip) || null,
-                        },
-                      })
-                      .catch(() => undefined);
-                    report.loginHistory.created += 1;
+            if (scope.loginHistory && upstreamId) {
+              try {
+                const history = asList(await client.getLoginHistory(upstreamId));
+                report.loginHistory.fetched += history.length;
+                const local = await this.prisma.client.findFirst({
+                  where: { tenantId, upstreamId },
+                  select: { id: true },
+                });
+                if (local) {
+                  for (const entry of history) {
+                    const loginAt = new Date(
+                      str(entry.login_at ?? entry.timestamp ?? entry.time) || Date.now(),
+                    );
+                    if (!Number.isNaN(loginAt.getTime())) {
+                      await this.prisma.loginHistory
+                        .create({
+                          data: {
+                            tenantId,
+                            clientId: local.id,
+                            upstreamId,
+                            loginAt,
+                            ip: str(entry.ip) || null,
+                          },
+                        })
+                        .catch(() => undefined);
+                      report.loginHistory.created += 1;
+                    }
                   }
                 }
+              } catch {
+                // Login history is optional; ignore per-client failures.
               }
-            } catch {
-              // Login history is optional; ignore per-client failures.
             }
           }
-        }
+
+          page += 1;
+        } while (page <= Math.min(lastPage, 100));
+
+        report.clients.fetched = fetched;
       } catch (error) {
         report.errors.push(`clients: ${(error as Error).message}`);
       }
@@ -607,7 +779,8 @@ export class UpstreamSyncService implements OnModuleInit {
       .catch(() => undefined);
   }
 
-  private async generatePaymentCode(tenantId: string): Promise<string> {    for (let attempt = 0; attempt < 50; attempt += 1) {
+  private async generatePaymentCode(tenantId: string): Promise<string> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
       const code = String(1000 + Math.floor(Math.random() * 9000));
       const existing = await this.prisma.client.findUnique({
         where: { tenantId_paymentCode: { tenantId, paymentCode: code } },

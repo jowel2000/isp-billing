@@ -28,6 +28,8 @@ export class TriangleClient {
 
   private browserToken: string | null = null;
   private challengeToken: string | null = null;
+  private accessToken: string | null = null;
+  private refreshToken: string | null = null;
   private username = '';
   private password = '';
 
@@ -74,6 +76,8 @@ export class TriangleClient {
     const challenge = this.extractChallengeToken(data);
     if (challenge) this.challengeToken = challenge;
 
+    this.captureTokens(data);
+
     return {
       otpRequired,
       cookies: this.jar.toJSON(),
@@ -96,6 +100,8 @@ export class TriangleClient {
       throw new TriangleApiError(`OTP verification failed (${status})`, status, data ?? text);
     }
 
+    this.captureTokens(data);
+
     return {
       otpRequired: false,
       cookies: this.jar.toJSON(),
@@ -107,10 +113,21 @@ export class TriangleClient {
     this.jar.load(cookies);
   }
 
+  /** Restores the login credentials needed by the OTP verify payload. */
+  restoreCredentials(username: string, password: string): void {
+    this.username = username;
+    this.password = password;
+  }
+
   /** Restores the browser/challenge tokens captured during the login step. */
   restoreOtpChallenge(challengeToken: string | null, browserToken: string | null): void {
     this.challengeToken = challengeToken;
     this.browserToken = browserToken;
+  }
+
+  restoreAuthTokens(accessToken: string | null, refreshToken: string | null): void {
+    this.accessToken = accessToken;
+    this.refreshToken = refreshToken;
   }
 
   getChallengeToken(): string | null {
@@ -119,6 +136,14 @@ export class TriangleClient {
 
   getBrowserToken(): string | null {
     return this.browserToken;
+  }
+
+  getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
+  getRefreshToken(): string | null {
+    return this.refreshToken;
   }
 
   sessionCookies(): Record<string, string> {
@@ -141,8 +166,16 @@ export class TriangleClient {
     return this.get('/api/v1/packages');
   }
 
+  async getSetupPackages(query: Record<string, string | number> = {}): Promise<unknown> {
+    return this.get('/api/v1/setup/packages', query);
+  }
+
   async getAreas(): Promise<unknown> {
     return this.get('/api/v1/areas');
+  }
+
+  async getSetupAreas(query: Record<string, string | number> = {}): Promise<unknown> {
+    return this.get('/api/v1/setup/areas', query);
   }
 
   async getLoginHistory(clientId: string): Promise<unknown> {
@@ -212,6 +245,26 @@ export class TriangleClient {
     return null;
   }
 
+  private captureTokens(data: unknown) {
+    const access = this.extractToken(data, 'access_token');
+    const refresh = this.extractToken(data, 'refresh_token');
+    if (access) this.accessToken = access;
+    if (refresh) this.refreshToken = refresh;
+  }
+
+  private extractToken(data: unknown, key: 'access_token' | 'refresh_token'): string | null {
+    if (!data || typeof data !== 'object') return null;
+    const record = data as Record<string, unknown>;
+    if (typeof record[key] === 'string') return record[key] as string;
+
+    const payload = record.payload;
+    if (payload && typeof payload === 'object') {
+      const token = (payload as Record<string, unknown>)[key];
+      if (typeof token === 'string') return token;
+    }
+    return null;
+  }
+
   private async get(
     path: string,
     query: Record<string, string | number> = {},
@@ -231,11 +284,16 @@ export class TriangleClient {
   private async request(
     path: string,
     init: { method: string; body?: string },
+    allowRefresh = true,
   ): Promise<{ status: number; data: unknown; text: string }> {
     await this.limiter.acquire();
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const isAuthPath =
+      path === '/api/v1/login' ||
+      path === '/api/v1/verify-login-otp' ||
+      path === '/api/v1/refresh-token';
 
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -247,6 +305,9 @@ export class TriangleClient {
           Accept: 'application/json, text/plain, */*',
           'Content-Type': 'application/json',
           'User-Agent': this.userAgent,
+          ...(this.accessToken && !isAuthPath
+            ? { Authorization: `Bearer ${this.accessToken}` }
+            : {}),
           ...(this.jar.size ? { Cookie: this.jar.toHeader() } : {}),
         },
       });
@@ -266,10 +327,13 @@ export class TriangleClient {
         throw new PanelLockedError();
       }
 
+      // Expired access token: refresh once, then retry the request.
       if (response.status === 401) {
-        // Login uses 401 for bad credentials; callers handle it. For other
-        // endpoints this means the session expired.
-        if (path !== '/api/v1/login') {
+        if (!isAuthPath) {
+          if (allowRefresh && this.refreshToken) {
+            const refreshed = await this.refreshAccessToken();
+            if (refreshed) return this.request(path, init, false);
+          }
           throw new SessionExpiredError();
         }
       }
@@ -277,6 +341,25 @@ export class TriangleClient {
       return { status: response.status, data, text };
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  private async refreshAccessToken(): Promise<boolean> {
+    if (!this.refreshToken) return false;
+    try {
+      const { status, data } = await this.request(
+        '/api/v1/refresh-token',
+        {
+          method: 'POST',
+          body: JSON.stringify({ refresh_token: this.refreshToken }),
+        },
+        false,
+      );
+      if (status >= 400) return false;
+      this.captureTokens(data);
+      return Boolean(this.accessToken);
+    } catch {
+      return false;
     }
   }
 
