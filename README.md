@@ -219,10 +219,20 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 
 - `POST /api/v1/upstream/sync` logs in to Triangle and scrapes **packages, areas and clients** into the local database, plus optional per-client login history (`{ "loginHistory": true }`).
 - When Triangle requires an OTP, the sync returns immediately with `status: "otp_required"` — the SMS forwarded from the phone automatically completes the flow (verify OTP → save session → scrape → update data). No more long HTTP waits.
-- Login attempts are rate-limited (10-minute cooldown) so repeated sync runs never spam OTP SMS to the phone.
+- Login attempts are rate-limited (10-minute cooldown) so repeated sync runs never spam OTP SMS to the phone. A **per-tenant sync lock** allows only one run at a time; runs hanging for 10 minutes are auto-failed.
+- The scraper uses the panel's real JSON endpoints (`setup/packages`, `setup/areas`, paginated `clients`) and sends the Bearer access token captured after OTP verification. All pages are fetched (per_page=100).
 - Existing records are updated by name/mobile/upstreamId; new clients get an auto 4-digit payment code and an active subscription when the package matches.
 - Every run stores an `AutomationJob` record with the full report — nothing fails silently.
 - Set `TRIANGLE_USERNAME` / `TRIANGLE_PASSWORD` in the environment, and `UPSTREAM_AUTO_SYNC=true` to auto-run the sync on an interval (default 30 minutes, configurable with `UPSTREAM_AUTO_SYNC_INTERVAL_MINUTES`, minimum 1).
+
+## Sync status bar & error log
+
+- A slim status bar sits at the very top of the app for **Super Admin / Admin / Staff** and shows the live step: `Sending OTP… → Verifying OTP & Logging in… → Login Successful → Scraping Data… → Uploading Data… → Finished`, or the failure/stop reason.
+- The bar polls `GET /api/v1/sync/status` every 2 seconds while a run is active (15 seconds otherwise).
+- Every failure is stored in `SyncError` with the step, error code, message, HTTP status and the upstream response body.
+- **Super Admin → Error** menu shows the log with a Copy button that formats the full error for pasting into an AI assistant.
+- Error logs are retained for 90 days; the status endpoint is restricted to the three staff roles and the error endpoints to the Super Admin only.
+- A 403 "administratively locked" response sets `upstream_lock_until` for 24 hours, blocking new login attempts and showing the lock in the status bar.
 
 ## SMS forwarding & automated OTP
 

@@ -519,6 +519,63 @@ export function syncUpstream() {
   });
 }
 
+// ---------------------------------------------------- Sync status & errors
+
+export interface SyncRunRecord {
+  id: string;
+  trigger: string;
+  triggeredBy: string | null;
+  status: 'running' | 'completed' | 'failed' | 'locked' | string;
+  currentStep: string;
+  stepMessage: string | null;
+  progress: number;
+  startedAt: string;
+  finishedAt: string | null;
+  stats: UpstreamSyncResult | null;
+  lastError: string | null;
+}
+
+export interface SyncStatusResponse {
+  run: SyncRunRecord | null;
+  errorCount: number;
+  lockUntil: string | null;
+}
+
+export function getSyncStatus() {
+  return liveFetch<SyncStatusResponse>('/sync/status');
+}
+
+export interface SyncErrorRecord {
+  id: string;
+  runId: string | null;
+  step: string;
+  code: string;
+  message: string;
+  detail: string | null;
+  httpStatus: number | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export function getSyncErrors(params: {
+  page?: number;
+  limit?: number;
+  code?: string;
+} = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== '') query.set(key, String(value));
+  });
+  return liveFetch<LogPage<SyncErrorRecord>>(`/sync/errors?${query.toString()}`);
+}
+
+export function refreshUpstream() {
+  return liveFetch<UpstreamSyncResult>('/upstream/refresh', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 export function getUsers(role?: string, archived = false) {
   const params = new URLSearchParams();
   if (role) params.set('role', role);

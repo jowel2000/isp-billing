@@ -38,6 +38,8 @@ model Tenant {
   automationJobs      AutomationJob[]
   rechargeJobs        RechargeJob[]
   smsInbound          SmsInbound[]
+  syncRuns            SyncRun[]
+  syncErrors          SyncError[]
   loginHistory        LoginHistory[]
   auditLogs           AuditLog[]
   otpRequests         OtpRequest[]
@@ -449,6 +451,45 @@ model WebhookAttempt {
   createdAt   DateTime @default(now())
 
   @@index([createdAt])
+}
+
+model SyncRun {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  trigger     String   @default("manual") // manual | auto | otp
+  triggeredBy String?
+  status      String   @default("running") // running | completed | failed | locked
+  currentStep String   @default("queued")
+  stepMessage String?
+  progress    Int      @default(0)
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+  stats       String?
+  lastError   String?
+
+  errors SyncError[]
+
+  @@index([tenantId, startedAt])
+  @@index([tenantId, status])
+}
+
+model SyncError {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  runId      String?
+  run        SyncRun? @relation(fields: [runId], references: [id])
+  step       String
+  code       String
+  message    String
+  detail     String?
+  httpStatus Int?
+  createdAt  DateTime @default(now())
+  resolvedAt DateTime?
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, code])
 }
 
 model SmsGateway {

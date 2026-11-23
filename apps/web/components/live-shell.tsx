@@ -10,6 +10,7 @@ import { liveFetch } from '@/lib/live-api';
 import { BrandMark } from './brand-mark';
 import { Icon, IconName } from './icon';
 import { LanguageSwitcher } from './language-switcher';
+import { SyncStatusBar } from './sync-status-bar';
 import { ThemeSwitcher } from './theme-switcher';
 
 interface NavItem {
@@ -19,6 +20,7 @@ interface NavItem {
   soon?: boolean;
   permission?: string;
   anyPermissions?: string[];
+  roles?: string[];
 }
 
 const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
@@ -74,6 +76,12 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         anyPermissions: ['logs.client_login', 'logs.user_login', 'logs.audit'],
       },
       {
+        href: '/errors',
+        label: 'nav.errors',
+        icon: 'alert',
+        roles: ['super_admin'],
+      },
+      {
         href: '/branding',
         label: 'nav.branding',
         icon: 'image',
@@ -96,6 +104,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/reports': 'page.reports',
   '/users': 'page.users',
   '/activity-logs': 'page.activityLogs',
+  '/errors': 'page.errors',
   '/mobile-banking': 'page.mobileBanking',
   '/branding': 'page.branding',
   '/settings': 'page.settings',
@@ -172,11 +181,13 @@ export function LiveShell({ children }: { children: React.ReactNode }) {
       (!item.anyPermissions ||
         item.anyPermissions.some((permission) =>
           user.permissions.includes(permission),
-        )),
+        )) &&
+      (!item.roles || item.roles.includes(user.role)),
   );
 
   return (
     <div className="demo-root">
+      <SyncStatusBar />
       <div className={`demo-overlay ${open ? 'show' : ''}`} onClick={() => setOpen(false)} />
 
       <aside className={`demo-sidebar ${open ? 'open' : ''}`}>

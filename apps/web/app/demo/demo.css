@@ -1627,3 +1627,121 @@ html[data-theme='dark'] .demo-avatar-sm {
   color: var(--d-muted);
 }
 
+/* ------------------------------------------------------ Sync status bar */
+
+.sync-status-bar {
+  grid-column: 1 / -1;
+  position: sticky;
+  top: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 6px 18px;
+  border-bottom: 1px solid var(--d-line);
+  background: var(--d-card);
+  color: var(--d-text);
+  font-size: 0.7rem;
+}
+
+.sync-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.sync-status-bar.amber .sync-status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.16);
+  animation: sync-pulse 1.2s ease-in-out infinite;
+}
+
+.sync-status-bar.green .sync-status-dot {
+  background: #10b981;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.14);
+}
+
+.sync-status-bar.red .sync-status-dot {
+  background: #e11d48;
+  box-shadow: 0 0 0 4px rgba(225, 29, 72, 0.14);
+}
+
+@keyframes sync-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.sync-status-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.01em;
+}
+
+.sync-status-text {
+  color: var(--d-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 52ch;
+}
+
+.sync-status-progress {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+  font-weight: 700;
+  font-size: 0.62rem;
+}
+
+html[data-theme='dark'] .sync-status-progress {
+  color: #fbbf24;
+}
+
+.sync-status-time {
+  margin-left: auto;
+  color: var(--d-muted);
+  font-size: 0.62rem;
+  white-space: nowrap;
+}
+
+.sync-status-errors {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--d-line);
+  border-radius: 999px;
+  color: var(--d-text);
+  font-size: 0.62rem;
+  font-weight: 650;
+}
+
+.sync-status-errors b {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #e11d48;
+  color: #fff;
+  font-size: 0.58rem;
+}
+
+@media (max-width: 760px) {
+  .sync-status-text {
+    display: none;
+  }
+  .sync-status-time {
+    display: none;
+  }
+}
+

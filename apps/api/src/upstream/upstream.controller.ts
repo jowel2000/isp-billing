@@ -41,7 +41,10 @@ export class UpstreamController {
       loginHistory?: boolean;
     },
   ) {
-    return this.syncService.sync(user.tenantId, body ?? {});
+    return this.syncService.sync(user.tenantId, body ?? {}, {
+      trigger: 'manual',
+      userId: user.id,
+    });
   }
 
   /**
@@ -53,6 +56,6 @@ export class UpstreamController {
   @UseGuards(RolesGuard)
   @RequireRoles('super_admin', 'admin', 'staff')
   refresh(@CurrentUser() user: AuthUser) {
-    return this.syncService.sync(user.tenantId);
+    return this.syncService.sync(user.tenantId, {}, { trigger: 'manual', userId: user.id });
   }
 }

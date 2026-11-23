@@ -10,6 +10,7 @@ import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ReportsModule } from './reports/reports.module';
 import { SettingsModule } from './settings/settings.module';
+import { SyncModule } from './sync/sync.module';
 import { UpstreamModule } from './upstream/upstream.module';
 import { UsersModule } from './users/users.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
@@ -31,6 +32,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     LogsModule,
     SettingsModule,
     UpstreamModule,
+    SyncModule,
     WebhooksModule,
     HealthModule,
   ],

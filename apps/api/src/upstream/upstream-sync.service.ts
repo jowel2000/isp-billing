@@ -5,12 +5,18 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { TriangleClient } from '@isp/adapter-triangle';
+import {
+  PanelLockedError,
+  SessionExpiredError,
+  TriangleApiError,
+  TriangleClient,
+} from '@isp/adapter-triangle';
 import { decryptString, encryptString } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { SyncStatusService } from '../sync/sync-status.service';
 
 interface SyncReport {
-  status: 'completed' | 'otp_required' | 'failed';
+  status: 'completed' | 'otp_required' | 'failed' | 'busy' | 'locked';
   lastUpdatedAt: string | null;
   packages: { fetched: number; created: number; updated: number };
   areas: { fetched: number; created: number; updated: number };
@@ -103,6 +109,7 @@ export class UpstreamSyncService implements OnModuleInit {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly syncStatus: SyncStatusService,
   ) {}
 
   onModuleInit() {
@@ -211,6 +218,7 @@ export class UpstreamSyncService implements OnModuleInit {
   private async ensureSession(
     tenantId: string,
     client: TriangleClient,
+    runId?: string | null,
   ): Promise<'ok' | 'otp_required'> {
     // Expire stale pending sessions (older than 7 days) so they do not pile up.
     await this.prisma.upstreamSession
@@ -253,16 +261,35 @@ export class UpstreamSyncService implements OnModuleInit {
       orderBy: { createdAt: 'desc' },
     });
     if (pending && Date.now() - pending.createdAt.getTime() < PENDING_OTP_TTL_MS) {
+      if (runId) {
+        await this.syncStatus.step(
+          runId,
+          'sending_otp',
+          'OTP requested — waiting for SMS',
+          15,
+        );
+      }
       return 'otp_required';
     }
 
     // 3. Cooldown: never attempt a fresh login more often than every 10 min.
     const lastAttempt = await this.lastLoginAttemptAt(tenantId);
     if (lastAttempt && Date.now() - lastAttempt < LOGIN_COOLDOWN_MS) {
+      if (runId) {
+        await this.syncStatus.step(
+          runId,
+          'sending_otp',
+          'OTP requested — waiting for SMS',
+          15,
+        );
+      }
       return 'otp_required';
     }
 
     // 4. Fresh login attempt (this triggers ONE OTP SMS from Triangle).
+    if (runId) {
+      await this.syncStatus.step(runId, 'sending_otp', 'Sending OTP...', 10);
+    }
     const { username, password } = this.credentials;
     const login = await client.login(username, password);
     await this.rememberLoginAttempt(tenantId);
@@ -290,14 +317,8 @@ export class UpstreamSyncService implements OnModuleInit {
   async sync(
     tenantId: string,
     scope: { clients?: boolean; packages?: boolean; areas?: boolean; loginHistory?: boolean } = {},
+    meta: { trigger?: 'manual' | 'auto'; userId?: string } = {},
   ): Promise<SyncReport> {
-    const { username, password } = this.credentials;
-    if (!username || !password) {
-      throw new BadRequestException(
-        'TRIANGLE_USERNAME / TRIANGLE_PASSWORD are not configured — set them in the environment',
-      );
-    }
-
     const empty = (): SyncReport => ({
       status: 'completed',
       lastUpdatedAt: null,
@@ -308,28 +329,185 @@ export class UpstreamSyncService implements OnModuleInit {
       errors: [],
     });
 
-    const client = this.newClient();
-    const state = await this.ensureSession(tenantId, client);
-
-    if (state !== 'ok') {
-      const report = empty();
-      report.status = 'otp_required';
-      report.note =
-        'OTP requested — when the forwarded SMS arrives the sync completes automatically. New logins are rate-limited to avoid SMS spam.';
-      return report;
+    const lockUntil = await this.syncStatus.lockedUntil(tenantId);
+    if (lockUntil) {
+      return {
+        ...empty(),
+        status: 'locked',
+        note: `Upstream panel is locked until ${lockUntil}. Contact Triangle support.`,
+        errors: [`UPSTREAM_LOCKED until ${lockUntil}`],
+      };
     }
 
-    const doScope = {
-      clients: scope.clients ?? true,
-      packages: scope.packages ?? true,
-      areas: scope.areas ?? true,
-      loginHistory: scope.loginHistory ?? false,
-    };
+    const { run, busy } = await this.syncStatus.start(
+      tenantId,
+      meta.trigger ?? 'manual',
+      meta.userId,
+    );
+    if (busy) {
+      return {
+        ...empty(),
+        status: 'busy',
+        note: 'Another sync is already running for this panel.',
+      };
+    }
 
-    const report = await this.scrapeAll(tenantId, client, doScope);
-    await this.markUpdated(tenantId, report);
-    await this.persistJob(tenantId, report);
-    return report;
+    try {
+      const { username, password } = this.credentials;
+      if (!username || !password) {
+        const input = {
+          step: 'queued',
+          code: 'CONFIG_MISSING',
+          message: 'TRIANGLE_USERNAME / TRIANGLE_PASSWORD are not configured',
+        };
+        await this.syncStatus.fail(run.id, tenantId, input);
+        return { ...empty(), status: 'failed', note: input.code, errors: [input.message] };
+      }
+
+      const client = this.newClient();
+
+      await this.syncStatus.step(run.id, 'sending_otp', 'Sending OTP...', 10);
+      const state = await this.ensureSession(tenantId, client, run.id);
+
+      if (state !== 'ok') {
+        const report = empty();
+        report.status = 'otp_required';
+        report.note =
+          'OTP requested — when the forwarded SMS arrives the sync completes automatically. New logins are rate-limited to avoid SMS spam.';
+        return report;
+      }
+
+      await this.syncStatus.step(run.id, 'login_success', 'Login successful', 35);
+
+      const doScope = {
+        clients: scope.clients ?? true,
+        packages: scope.packages ?? true,
+        areas: scope.areas ?? true,
+        loginHistory: scope.loginHistory ?? false,
+      };
+
+      const report = await this.scrapeAll(tenantId, client, doScope, run.id);
+      await this.markUpdated(tenantId, report);
+      await this.persistJob(tenantId, report);
+
+      if (report.errors.length > 0) {
+        await this.syncStatus.fail(run.id, tenantId, {
+          step: 'uploading',
+          code: 'SCRAPE_PARTIAL',
+          message: 'Some data could not be synced',
+          detail: report.errors,
+        });
+        report.status = 'failed';
+        report.note = 'SCRAPE_PARTIAL';
+        return report;
+      }
+
+      await this.syncStatus.finish(run.id, tenantId, report);
+      return report;
+    } catch (error) {
+      const mapped = this.mapError(error, 'sync');
+      if (mapped.code === 'UPSTREAM_LOCKED') {
+        await this.syncStatus.lockPanel(tenantId, 24);
+      }
+      await this.syncStatus.fail(run.id, tenantId, mapped);
+      return { ...empty(), status: 'failed', note: mapped.code, errors: [mapped.message] };
+    }
+  }
+
+  /** Maps adapter errors to a code/step/detail for the error log. */
+  private mapError(
+    error: unknown,
+    defaultStep: string,
+  ): {
+    step: string;
+    code: string;
+    message: string;
+    detail: unknown;
+    httpStatus: number | null;
+  } {
+    if (error instanceof TriangleApiError) {
+      const body = error.body as
+        | { message?: string; payload?: unknown; code?: string }
+        | null
+        | undefined;
+      const text = JSON.stringify(body ?? '');
+      const message = body?.message || error.message;
+
+      if (error.status === 403 && /(lock|লক|administrative)/i.test(text)) {
+        return {
+          step: 'verifying_otp',
+          code: 'UPSTREAM_LOCKED',
+          message:
+            body?.message ||
+            'Upstream panel is administratively locked due to excessive requests',
+          detail: body,
+          httpStatus: 403,
+        };
+      }
+      if (error.status === 422) {
+        return {
+          step: 'verifying_otp',
+          code: 'OTP_422',
+          message,
+          detail: body,
+          httpStatus: 422,
+        };
+      }
+      if (error.status === 401) {
+        return {
+          step: defaultStep,
+          code: 'AUTH_401',
+          message,
+          detail: body,
+          httpStatus: 401,
+        };
+      }
+      return {
+        step: defaultStep,
+        code: `HTTP_${error.status}`,
+        message,
+        detail: body,
+        httpStatus: error.status,
+      };
+    }
+
+    if (error instanceof PanelLockedError) {
+      return {
+        step: defaultStep,
+        code: 'PANEL_LOCKED',
+        message: error.message,
+        detail: null,
+        httpStatus: 429,
+      };
+    }
+
+    if (error instanceof SessionExpiredError) {
+      return {
+        step: defaultStep,
+        code: 'SESSION_EXPIRED',
+        message: error.message,
+        detail: null,
+        httpStatus: 401,
+      };
+    }
+
+    if ((error as { name?: string })?.name === 'AbortError') {
+      return {
+        step: defaultStep,
+        code: 'NETWORK_TIMEOUT',
+        message: 'Upstream request timed out',
+        detail: null,
+        httpStatus: null,
+      };
+    }
+
+    return {
+      step: defaultStep,
+      code: 'SYNC_FAILED',
+      message: (error as Error)?.message || 'Unknown sync failure',
+      detail: null,
+      httpStatus: null,
+    };
   }
 
   /**
@@ -339,7 +517,19 @@ export class UpstreamSyncService implements OnModuleInit {
   async completeLoginAndSync(tenantId: string) {
     if (this.busy.has(tenantId)) return { status: 'busy' as const };
     this.busy.add(tenantId);
+    let runId: string | null = null;
     try {
+      const running = await this.syncStatus.findRunning(tenantId);
+      const run = running ?? (await this.syncStatus.start(tenantId, 'otp')).run;
+      runId = run.id;
+
+      await this.syncStatus.step(
+        runId,
+        'verifying_otp',
+        'Verifying OTP & Logging in...',
+        25,
+      );
+
       const pending = await this.prisma.upstreamSession.findFirst({
         where: { tenantId, status: 'pending_otp' },
         orderBy: { createdAt: 'desc' },
@@ -356,7 +546,13 @@ export class UpstreamSyncService implements OnModuleInit {
       });
 
       if (!pending?.cookieEnc || !otpRow?.codeEnc) {
-        return { status: 'nothing_to_do' as const };
+        const input = {
+          step: 'verifying_otp',
+          code: 'OTP_MISSING',
+          message: 'No pending OTP or pending login session found',
+        };
+        await this.syncStatus.fail(runId, tenantId, input);
+        return { status: 'nothing_to_do' as const, error: input.code };
       }
 
       const envelope = this.parseSessionEnvelope(pending.cookieEnc);
@@ -370,6 +566,8 @@ export class UpstreamSyncService implements OnModuleInit {
 
       // Verify first; only consume the OTP after the upstream accepts it.
       await client.verifyOtp(decryptString(otpRow.codeEnc));
+
+      await this.syncStatus.step(runId, 'login_success', 'Login successful', 35);
 
       await this.prisma.otpRequest.update({
         where: { id: otpRow.id },
@@ -385,21 +583,37 @@ export class UpstreamSyncService implements OnModuleInit {
         },
       });
 
-      const report = await this.scrapeAll(tenantId, client, {
-        clients: true,
-        packages: true,
-        areas: true,
-        loginHistory: false,
-      });
+      const report = await this.scrapeAll(
+        tenantId,
+        client,
+        {
+          clients: true,
+          packages: true,
+          areas: true,
+          loginHistory: false,
+        },
+        runId,
+      );
       await this.markUpdated(tenantId, report);
       await this.persistJob(tenantId, report);
+
+      if (report.errors.length > 0) {
+        await this.syncStatus.fail(runId, tenantId, {
+          step: 'uploading',
+          code: 'SCRAPE_PARTIAL',
+          message: 'Some data could not be synced',
+          detail: report.errors,
+        });
+      } else {
+        await this.syncStatus.finish(runId, tenantId, report);
+      }
 
       await this.prisma.automationJob
         .create({
           data: {
             tenantId,
             type: 'upstream_otp_login',
-            status: 'completed',
+            status: report.errors.length ? 'failed' : 'completed',
             payload: JSON.stringify({ at: new Date().toISOString(), report }),
             finishedAt: new Date(),
           },
@@ -411,9 +625,15 @@ export class UpstreamSyncService implements OnModuleInit {
       const message = (error as Error).message;
       const status = (error as { status?: number })?.status ?? null;
       const upstreamBody = (error as { body?: unknown })?.body ?? null;
+      const mapped = this.mapError(error, 'verifying_otp');
+
+      if (mapped.code === 'UPSTREAM_LOCKED') {
+        await this.syncStatus.lockPanel(tenantId, 24);
+      }
+      await this.syncStatus.fail(runId, tenantId, mapped);
 
       // Persist the failure — including the upstream validation body — so the
-      // exact reason (e.g. a 422 field error) is visible without server logs.
+      // exact reason is visible without server logs.
       await this.prisma.automationJob
         .create({
           data: {
@@ -426,6 +646,7 @@ export class UpstreamSyncService implements OnModuleInit {
               error: message,
               status,
               body: upstreamBody,
+              code: mapped.code,
             }),
             finishedAt: new Date(),
           },
@@ -433,7 +654,7 @@ export class UpstreamSyncService implements OnModuleInit {
         .catch(() => undefined);
 
       this.logger.warn(`completeLoginAndSync failed: ${message}`);
-      return { status: 'failed' as const, error: message };
+      return { status: 'failed' as const, error: message, code: mapped.code };
     } finally {
       this.busy.delete(tenantId);
     }
@@ -444,6 +665,7 @@ export class UpstreamSyncService implements OnModuleInit {
     tenantId: string,
     client: TriangleClient,
     scope: { clients: boolean; packages: boolean; areas: boolean; loginHistory: boolean },
+    runId?: string | null,
   ): Promise<SyncReport> {
     const report: SyncReport = {
       status: 'completed',
@@ -454,6 +676,15 @@ export class UpstreamSyncService implements OnModuleInit {
       loginHistory: { fetched: 0, created: 0 },
       errors: [],
     };
+
+    if (runId) {
+      await this.syncStatus.step(
+        runId,
+        'scraping',
+        'Scraping data from upstream...',
+        40,
+      );
+    }
 
     if (scope.packages) {
       try {
@@ -503,7 +734,13 @@ export class UpstreamSyncService implements OnModuleInit {
           }
         }
       } catch (error) {
-        report.errors.push(`packages: ${(error as Error).message}`);
+        const message = (error as Error).message;
+        report.errors.push(`packages: ${message}`);
+        await this.syncStatus.recordError(tenantId, runId ?? null, {
+          step: 'scraping',
+          code: 'PACKAGES_SYNC',
+          message,
+        });
       }
     }
 
@@ -557,8 +794,23 @@ export class UpstreamSyncService implements OnModuleInit {
           }
         }
       } catch (error) {
-        report.errors.push(`areas: ${(error as Error).message}`);
+        const message = (error as Error).message;
+        report.errors.push(`areas: ${message}`);
+        await this.syncStatus.recordError(tenantId, runId ?? null, {
+          step: 'scraping',
+          code: 'AREAS_SYNC',
+          message,
+        });
       }
+    }
+
+    if (runId) {
+      await this.syncStatus.step(
+        runId,
+        'uploading',
+        'Uploading data to software...',
+        70,
+      );
     }
 
     if (scope.clients) {
@@ -759,7 +1011,13 @@ export class UpstreamSyncService implements OnModuleInit {
 
         report.clients.fetched = fetched;
       } catch (error) {
-        report.errors.push(`clients: ${(error as Error).message}`);
+        const message = (error as Error).message;
+        report.errors.push(`clients: ${message}`);
+        await this.syncStatus.recordError(tenantId, runId ?? null, {
+          step: 'uploading',
+          code: 'CLIENTS_SYNC',
+          message,
+        });
       }
     }
 
@@ -823,7 +1081,7 @@ export class UpstreamSyncService implements OnModuleInit {
       });
       for (const tenant of tenants) {
         try {
-          await this.sync(tenant.id);
+          await this.sync(tenant.id, {}, { trigger: 'auto' });
         } catch (error) {
           this.logger.warn(`Auto sync failed for ${tenant.id}: ${(error as Error).message}`);
         }
