@@ -206,6 +206,12 @@ const dictionary: Record<string, { bn: string; en: string }> = {
   'sync.idle': { bn: 'প্রস্তুত', en: 'Idle' },
   'sync.queued': { bn: 'Sync শুরু হচ্ছে…', en: 'Starting sync…' },
   'sync.sendingOtp': { bn: 'OTP পাঠানো হচ্ছে…', en: 'Sending OTP…' },
+  'sync.waitingOtp': { bn: 'OTP SMS-এর অপেক্ষায়…', en: 'Waiting for OTP SMS…' },
+  'sync.lastSms': { bn: 'সর্বশেষ SMS:', en: 'Last SMS received:' },
+  'sync.noSmsYet': {
+    bn: 'এখনো কোনো SMS আসেনি — MacroDroid চেক করুন',
+    en: 'No SMS received yet — check MacroDroid',
+  },
   'sync.verifyingOtp': { bn: 'OTP যাচাই ও লগইন হচ্ছে…', en: 'Verifying OTP & Logging in…' },
   'sync.loginSuccess': { bn: 'লগইন সফল', en: 'Login Successful' },
   'sync.scraping': { bn: 'ডেটা সংগ্রহ হচ্ছে…', en: 'Scraping Data…' },

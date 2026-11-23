@@ -504,7 +504,8 @@ export function matchSmsPayment(id: string, clientId: string) {
 }
 
 export interface UpstreamSyncResult {
-  status: 'completed' | 'otp_required' | 'failed';
+  status: 'completed' | 'otp_required' | 'failed' | 'busy' | 'locked';
+  lastUpdatedAt: string | null;
   packages: { fetched: number; created: number; updated: number };
   areas: { fetched: number; created: number; updated: number };
   clients: { fetched: number; created: number; updated: number };
@@ -539,6 +540,7 @@ export interface SyncStatusResponse {
   run: SyncRunRecord | null;
   errorCount: number;
   lockUntil: string | null;
+  lastSmsAt?: string | null;
 }
 
 export function getSyncStatus() {

@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export type SyncStep =
   | 'queued'
   | 'sending_otp'
+  | 'waiting_otp'
   | 'verifying_otp'
   | 'login_success'
   | 'scraping'
@@ -12,6 +13,7 @@ export type SyncStep =
   | 'failed';
 
 const STALE_RUN_MS = 10 * 60 * 1000;
+const OTP_WAIT_MS = 4 * 60 * 1000;
 const RETENTION_DAYS = 90;
 const LOCK_KEY = 'upstream_lock_until';
 
@@ -221,13 +223,22 @@ export class SyncStatusService implements OnModuleInit {
   }
 
   async status(tenantId: string) {
-    const [run, errorCount, lockUntil] = await Promise.all([
+    // Never leave the UI stuck: expire runs that have been waiting for an OTP
+    // or running for too long, and record the reason.
+    await this.expireStuck(tenantId);
+
+    const [run, errorCount, lockUntil, lastSms] = await Promise.all([
       this.prisma.syncRun.findFirst({
         where: { tenantId },
         orderBy: { startedAt: 'desc' },
       }),
       this.prisma.syncError.count({ where: { tenantId, resolvedAt: null } }),
       this.lockedUntil(tenantId),
+      this.prisma.webhookAttempt.findFirst({
+        where: { success: true },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      }),
     ]);
 
     return {
@@ -239,7 +250,45 @@ export class SyncStatusService implements OnModuleInit {
         : null,
       errorCount,
       lockUntil,
+      lastSmsAt: lastSms?.createdAt ?? null,
     };
+  }
+
+  private async expireStuck(tenantId: string) {
+    const waiting = await this.prisma.syncRun.findFirst({
+      where: {
+        tenantId,
+        status: 'running',
+        currentStep: { in: ['sending_otp', 'waiting_otp'] },
+        startedAt: { lt: new Date(Date.now() - OTP_WAIT_MS) },
+      },
+      orderBy: { startedAt: 'asc' },
+    });
+    if (waiting) {
+      await this.fail(waiting.id, tenantId, {
+        step: 'waiting_otp',
+        code: 'OTP_TIMEOUT',
+        message: 'OTP SMS did not reach the server within 4 minutes',
+        detail:
+          'No webhook request was received from the phone. Check that MacroDroid is enabled, battery optimization is off, auto-start is allowed, and the SMS trigger uses Any Number / Any content.',
+      });
+    }
+
+    const stale = await this.prisma.syncRun.findFirst({
+      where: {
+        tenantId,
+        status: 'running',
+        startedAt: { lt: new Date(Date.now() - STALE_RUN_MS) },
+      },
+      orderBy: { startedAt: 'asc' },
+    });
+    if (stale) {
+      await this.fail(stale.id, tenantId, {
+        step: 'sync',
+        code: 'SYNC_STALE',
+        message: 'Sync timed out after 10 minutes',
+      });
+    }
   }
 
   async errors(

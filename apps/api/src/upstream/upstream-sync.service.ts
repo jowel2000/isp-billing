@@ -264,8 +264,8 @@ export class UpstreamSyncService implements OnModuleInit {
       if (runId) {
         await this.syncStatus.step(
           runId,
-          'sending_otp',
-          'OTP requested — waiting for SMS',
+          'waiting_otp',
+          'Waiting for OTP SMS — forward it from your phone',
           15,
         );
       }
@@ -278,8 +278,8 @@ export class UpstreamSyncService implements OnModuleInit {
       if (runId) {
         await this.syncStatus.step(
           runId,
-          'sending_otp',
-          'OTP requested — waiting for SMS',
+          'waiting_otp',
+          'Waiting for OTP SMS — forward it from your phone',
           15,
         );
       }
@@ -370,6 +370,12 @@ export class UpstreamSyncService implements OnModuleInit {
       const state = await this.ensureSession(tenantId, client, run.id);
 
       if (state !== 'ok') {
+        await this.syncStatus.step(
+          run.id,
+          'waiting_otp',
+          'Waiting for OTP SMS — forward it from your phone',
+          15,
+        );
         const report = empty();
         report.status = 'otp_required';
         report.note =

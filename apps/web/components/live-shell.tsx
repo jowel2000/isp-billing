@@ -148,7 +148,7 @@ export function LiveShell({ children }: { children: React.ReactNode }) {
         body: JSON.stringify({}),
       });
       setRefreshState(
-        result.status === 'otp_required'
+        result.status === 'otp_required' || result.status === 'busy'
           ? 'otp'
           : result.status === 'completed'
             ? 'done'

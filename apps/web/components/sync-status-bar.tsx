@@ -12,6 +12,7 @@ const VISIBLE_ROLES = ['super_admin', 'admin', 'staff'];
 const STEP_KEYS: Record<string, string> = {
   queued: 'sync.queued',
   sending_otp: 'sync.sendingOtp',
+  waiting_otp: 'sync.waitingOtp',
   verifying_otp: 'sync.verifyingOtp',
   login_success: 'sync.loginSuccess',
   scraping: 'sync.scraping',
@@ -87,12 +88,20 @@ export function SyncStatusBar() {
     ? `${t('sync.lockedHint')} ${formatClock(lockUntil)}`
     : run?.stepMessage || '';
 
+  const lastSmsHint =
+    step === 'waiting_otp' && status?.lastSmsAt
+      ? `${t('sync.lastSms')} ${formatClock(status.lastSmsAt)}`
+      : step === 'waiting_otp'
+        ? t('sync.noSmsYet')
+        : '';
+
   return (
     <div className={`sync-status-bar ${tone}`}>
       <span className="sync-status-dot" />
       <strong className="sync-status-label">{label}</strong>
 
       {detail ? <span className="sync-status-text">{detail}</span> : null}
+      {lastSmsHint ? <span className="sync-status-text">{lastSmsHint}</span> : null}
 
       {run?.status === 'running' ? (
         <span className="sync-status-progress">{Math.round(run.progress ?? 0)}%</span>
