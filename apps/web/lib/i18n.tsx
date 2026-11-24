@@ -64,6 +64,11 @@ const dictionary: Record<string, { bn: string; en: string }> = {
   'app.refreshSyncing': { bn: 'Refresh হচ্ছে…', en: 'Refreshing…' },
   'app.refreshDone': { bn: 'Refresh সম্পন্ন ✓', en: 'Refreshed ✓' },
   'app.refreshOtp': { bn: 'OTP এলে ডেটা আসবে', en: 'Waiting for OTP' },
+  'app.refreshCooldown': { bn: 'কুলডাউন', en: 'Cooldown' },
+  'app.refreshCooldownTitle': {
+    bn: 'লগইন কুলডাউন চলছে — অপেক্ষা করুন',
+    en: 'Login cooldown active — please wait',
+  },
   'app.refreshError': { bn: 'Refresh ব্যর্থ', en: 'Refresh failed' },
   'app.logout': { bn: 'লগআউট', en: 'Logout' },
   'auth.signIn': { bn: 'লগইন', en: 'Login' },

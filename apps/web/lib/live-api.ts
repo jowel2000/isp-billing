@@ -504,13 +504,14 @@ export function matchSmsPayment(id: string, clientId: string) {
 }
 
 export interface UpstreamSyncResult {
-  status: 'completed' | 'otp_required' | 'failed' | 'busy' | 'locked';
+  status: 'completed' | 'otp_required' | 'failed' | 'busy' | 'locked' | 'cooldown';
   lastUpdatedAt: string | null;
   packages: { fetched: number; created: number; updated: number };
   areas: { fetched: number; created: number; updated: number };
   clients: { fetched: number; created: number; updated: number };
   errors: string[];
   note?: string;
+  retryAfterSeconds?: number;
 }
 
 export function syncUpstream() {
@@ -549,6 +550,8 @@ export interface SyncStatusResponse {
   run: SyncRunRecord | null;
   errorCount: number;
   lockUntil: string | null;
+  cooldownUntil?: string | null;
+  cooldownSecondsRemaining?: number;
   lastSmsAt?: string | null;
   otpWindow?: SyncOtpWindow | null;
 }

@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
 import { useBranding } from '@/lib/branding';
 import { useI18n } from '@/lib/i18n';
 import { useLiveAuth } from '@/lib/live-auth';
-import { liveFetch } from '@/lib/live-api';
+import { getSyncStatus, liveFetch } from '@/lib/live-api';
 import { BrandMark } from './brand-mark';
 import { Icon, IconName } from './icon';
 import { LanguageSwitcher } from './language-switcher';
@@ -124,6 +124,14 @@ interface RefreshResult {
   status: string;
   lastUpdatedAt?: string | null;
   errors?: string[];
+  retryAfterSeconds?: number;
+}
+
+function formatCooldown(totalSeconds: number) {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
 export function LiveShell({ children }: { children: React.ReactNode }) {
@@ -135,6 +143,7 @@ export function LiveShell({ children }: { children: React.ReactNode }) {
   const [refreshState, setRefreshState] = useState<
     'idle' | 'refreshing' | 'done' | 'otp' | 'error'
   >('idle');
+  const [cooldownSeconds, setCooldownSeconds] = useState(0);
 
   // Strict role check (frontend): Super Admin / Admin / Staff only.
   const canRefresh = user ? REFRESH_ROLES.includes(user.role) : false;
@@ -147,8 +156,13 @@ export function LiveShell({ children }: { children: React.ReactNode }) {
         method: 'POST',
         body: JSON.stringify({}),
       });
+      if (result.status === 'cooldown') {
+        setCooldownSeconds(result.retryAfterSeconds ?? 0);
+      }
       setRefreshState(
-        result.status === 'otp_required' || result.status === 'busy'
+        result.status === 'otp_required' ||
+          result.status === 'busy' ||
+          result.status === 'cooldown'
           ? 'otp'
           : result.status === 'completed'
             ? 'done'
@@ -163,6 +177,36 @@ export function LiveShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
+
+  // Poll the cooldown so the top Refresh button can be replaced by a
+  // countdown while a fresh OTP request is rate-limited.
+  useEffect(() => {
+    if (!canRefresh) return;
+
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const tick = async () => {
+      let delay = 15000;
+      try {
+        const status = await getSyncStatus();
+        if (!active) return;
+        const remaining = status.cooldownSecondsRemaining ?? 0;
+        setCooldownSeconds(remaining);
+        // Smooth countdown while cooling down; idle polling otherwise.
+        delay = remaining > 0 ? 1000 : 15000;
+      } catch {
+        // Ignore transient status failures; the Refresh button still works.
+      }
+      if (active) timer = setTimeout(tick, delay);
+    };
+
+    tick();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [canRefresh]);
 
   if (!user) return null;
 
@@ -271,23 +315,33 @@ export function LiveShell({ children }: { children: React.ReactNode }) {
             <LanguageSwitcher />
             <span className="live-chip">{t('app.liveData')}</span>
             {canRefresh ? (
-              <button
-                className={`demo-btn sm ${refreshState === 'error' ? 'danger' : refreshState === 'done' ? 'primary' : ''}`}
-                type="button"
-                onClick={onUpstreamRefresh}
-                title={t('app.refreshTitle')}
-              >
-                <Icon name="trend-up" size={14} />
-                {refreshState === 'refreshing'
-                  ? t('app.refreshSyncing')
-                  : refreshState === 'done'
-                    ? t('app.refreshDone')
-                    : refreshState === 'otp'
-                      ? t('app.refreshOtp')
-                      : refreshState === 'error'
-                        ? t('app.refreshError')
-                        : t('app.refreshNow')}
-              </button>
+              cooldownSeconds > 0 ? (
+                <span
+                  className="demo-btn sm demo-cooldown"
+                  title={t('app.refreshCooldownTitle')}
+                >
+                  <Icon name="clock" size={14} />
+                  {t('app.refreshCooldown')} {formatCooldown(cooldownSeconds)}
+                </span>
+              ) : (
+                <button
+                  className={`demo-btn sm ${refreshState === 'error' ? 'danger' : refreshState === 'done' ? 'primary' : ''}`}
+                  type="button"
+                  onClick={onUpstreamRefresh}
+                  title={t('app.refreshTitle')}
+                >
+                  <Icon name="trend-up" size={14} />
+                  {refreshState === 'refreshing'
+                    ? t('app.refreshSyncing')
+                    : refreshState === 'done'
+                      ? t('app.refreshDone')
+                      : refreshState === 'otp'
+                        ? t('app.refreshOtp')
+                        : refreshState === 'error'
+                          ? t('app.refreshError')
+                          : t('app.refreshNow')}
+                </button>
+              )
             ) : null}
             <button className="demo-icon-btn" aria-label="Notifications">
               <Icon name="bell" size={18} />

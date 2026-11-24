@@ -458,6 +458,25 @@
   border-radius: 8px;
 }
 
+.demo-cooldown {
+  cursor: default;
+  border-style: dashed;
+  color: var(--d-muted);
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.demo-cooldown:hover {
+  background: rgba(148, 163, 184, 0.08);
+  border-color: inherit;
+  transform: none;
+}
+
+html[data-theme='dark'] .demo-cooldown {
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+}
+
 /* --------------------------------------------------------------- Stats */
 
 .demo-stat-grid {

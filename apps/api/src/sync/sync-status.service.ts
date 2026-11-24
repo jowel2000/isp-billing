@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type SyncStep =
@@ -22,7 +23,10 @@ export class SyncStatusService implements OnModuleInit {
   private readonly logger = new Logger('SyncStatus');
   private readonly active = new Map<string, string>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+  ) {}
 
   onModuleInit() {
     this.cleanup().catch((error) =>
@@ -222,12 +226,42 @@ export class SyncStatusService implements OnModuleInit {
     return until.toISOString();
   }
 
+  /** Login cooldown (default 5 minutes) exposed to the Refresh button. */
+  async cooldown(tenantId: string) {
+    const row = await this.prisma.setting.findUnique({
+      where: {
+        tenantId_key: { tenantId, key: 'upstream_last_login_attempt' },
+      },
+    });
+
+    const rawMinutes = Number(
+      this.config.get<string>('UPSTREAM_LOGIN_COOLDOWN_MINUTES'),
+    );
+    const minutes =
+      Number.isFinite(rawMinutes) && rawMinutes >= 1
+        ? Math.min(rawMinutes, 60)
+        : 5;
+    const cooldownMs = minutes * 60 * 1000;
+
+    if (!row?.value) {
+      return { cooldownUntil: null, cooldownSecondsRemaining: 0 };
+    }
+
+    const untilMs = Number(row.value) + cooldownMs;
+    const remaining = Math.max(0, Math.ceil((untilMs - Date.now()) / 1000));
+
+    return {
+      cooldownUntil: remaining > 0 ? new Date(untilMs).toISOString() : null,
+      cooldownSecondsRemaining: remaining,
+    };
+  }
+
   async status(tenantId: string) {
     // Never leave the UI stuck: expire runs that have been waiting for an OTP
     // or running for too long, and record the reason.
     await this.expireStuck(tenantId);
 
-    const [run, errorCount, lockUntil, lastSms, otpWindow] = await Promise.all([
+    const [run, errorCount, lockUntil, lastSms, otpWindow, cooldown] = await Promise.all([
       this.prisma.syncRun.findFirst({
         where: { tenantId },
         orderBy: { startedAt: 'desc' },
@@ -243,6 +277,7 @@ export class SyncStatusService implements OnModuleInit {
         where: { tenantId, status: { in: ['pending', 'verifying'] } },
         orderBy: { requestedAt: 'desc' },
       }),
+      this.cooldown(tenantId),
     ]);
 
     return {
@@ -254,6 +289,8 @@ export class SyncStatusService implements OnModuleInit {
         : null,
       errorCount,
       lockUntil,
+      cooldownUntil: cooldown.cooldownUntil,
+      cooldownSecondsRemaining: cooldown.cooldownSecondsRemaining,
       lastSmsAt: lastSms?.createdAt ?? null,
       otpWindow: otpWindow
         ? {

@@ -17,7 +17,7 @@ import { SyncStatusService } from '../sync/sync-status.service';
 import { OtpWindowService } from './otp-window.service';
 
 interface SyncReport {
-  status: 'completed' | 'otp_required' | 'failed' | 'busy' | 'locked';
+  status: 'completed' | 'otp_required' | 'failed' | 'busy' | 'locked' | 'cooldown';
   lastUpdatedAt: string | null;
   packages: { fetched: number; created: number; updated: number };
   areas: { fetched: number; created: number; updated: number };
@@ -25,10 +25,11 @@ interface SyncReport {
   loginHistory: { fetched: number; created: number };
   errors: string[];
   note?: string;
+  retryAfterSeconds?: number;
 }
 
-const LOGIN_COOLDOWN_MS = 10 * 60 * 1000;
 const PENDING_OTP_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_LOGIN_COOLDOWN_MINUTES = 5;
 
 function asList(payload: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(payload)) return payload as Array<Record<string, unknown>>;
@@ -150,6 +151,42 @@ export class UpstreamSyncService implements OnModuleInit {
     return row?.value ? Number(row.value) : 0;
   }
 
+  private loginCooldownMs(): number {
+    const raw = Number(
+      this.config.get<string>('UPSTREAM_LOGIN_COOLDOWN_MINUTES'),
+    );
+    const minutes =
+      Number.isFinite(raw) && raw >= 1
+        ? Math.min(raw, 60)
+        : DEFAULT_LOGIN_COOLDOWN_MINUTES;
+    return minutes * 60 * 1000;
+  }
+
+  private async loginCooldownRemaining(tenantId: string): Promise<number> {
+    const lastAttempt = await this.lastLoginAttemptAt(tenantId);
+    if (!lastAttempt) return 0;
+    return Math.max(0, lastAttempt + this.loginCooldownMs() - Date.now());
+  }
+
+  /** True when Refresh can reuse an active session or a fresh pending login. */
+  private async hasReusableSession(tenantId: string): Promise<boolean> {
+    const active = await this.prisma.upstreamSession.findFirst({
+      where: { tenantId, status: 'active' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    if (active) return true;
+
+    const pending = await this.prisma.upstreamSession.findFirst({
+      where: { tenantId, status: 'pending_otp' },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    return Boolean(
+      pending && Date.now() - pending.createdAt.getTime() < PENDING_OTP_TTL_MS,
+    );
+  }
+
   /**
    * Session payload envelope: cookies + the OTP challenge/browser tokens.
    * Older rows stored plain cookies JSON — both shapes are accepted.
@@ -222,7 +259,7 @@ export class UpstreamSyncService implements OnModuleInit {
     client: TriangleClient,
     runId?: string | null,
     meta: { trigger: 'manual' | 'auto'; userId?: string } = { trigger: 'manual' },
-  ): Promise<'ok' | 'otp_required'> {
+  ): Promise<'ok' | 'otp_required' | 'cooldown'> {
     // Expire stale pending sessions (older than 7 days) so they do not pile up.
     await this.prisma.upstreamSession
       .updateMany({
@@ -291,14 +328,15 @@ export class UpstreamSyncService implements OnModuleInit {
       return 'otp_required';
     }
 
-    // 3. Cooldown: never attempt a fresh login more often than every 10 min.
-    const lastAttempt = await this.lastLoginAttemptAt(tenantId);
-    if (lastAttempt && Date.now() - lastAttempt < LOGIN_COOLDOWN_MS) {
+    // 3. Cooldown: never attempt a fresh login more often than the
+    // configurable interval (default 5 minutes).
+    const cooldownRemaining = await this.loginCooldownRemaining(tenantId);
+    if (cooldownRemaining > 0) {
       if (runId) {
         await this.syncStatus.step(
           runId,
           'waiting_otp',
-          'Waiting for OTP SMS — forward it from your phone',
+          `Login cooldown active — retry in ${Math.ceil(cooldownRemaining / 1000)}s`,
           15,
         );
       }
@@ -372,6 +410,19 @@ export class UpstreamSyncService implements OnModuleInit {
         status: 'locked',
         note: `Upstream panel is locked until ${lockUntil}. Contact Triangle support.`,
         errors: [`UPSTREAM_LOCKED until ${lockUntil}`],
+      };
+    }
+
+    // A refresh during cooldown must not create a 5-minute waiting run with no
+    // active OTP window. Reusing an active/fresh session is still allowed.
+    const cooldownRemaining = await this.loginCooldownRemaining(tenantId);
+    if (cooldownRemaining > 0 && !(await this.hasReusableSession(tenantId))) {
+      const seconds = Math.ceil(cooldownRemaining / 1000);
+      return {
+        ...empty(),
+        status: 'cooldown',
+        retryAfterSeconds: seconds,
+        note: `Login cooldown active — retry in ${seconds}s`,
       };
     }
 

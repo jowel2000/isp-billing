@@ -219,7 +219,7 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 
 - `POST /api/v1/upstream/sync` logs in to Triangle and scrapes **packages, areas and clients** into the local database, plus optional per-client login history (`{ "loginHistory": true }`).
 - When Triangle requires an OTP, the sync returns immediately with `status: "otp_required"` — the SMS forwarded from the phone automatically completes the flow (verify OTP → save session → scrape → update data). No more long HTTP waits.
-- Login attempts are rate-limited (10-minute cooldown) so repeated sync runs never spam OTP SMS to the phone. A **per-tenant sync lock** allows only one run at a time; runs hanging for 10 minutes are auto-failed.
+- Login attempts are rate-limited by a configurable cooldown (default **5 minutes**, `UPSTREAM_LOGIN_COOLDOWN_MINUTES`) so repeated sync runs never spam OTP SMS to the phone. During the cooldown the top Refresh button is replaced by a live countdown. A **per-tenant sync lock** allows only one run at a time; runs hanging for 10 minutes are auto-failed.
 - The scraper uses the panel's real JSON endpoints (`setup/packages`, `setup/areas`, paginated `clients`) and sends the Bearer access token captured after OTP verification. All pages are fetched (per_page=100).
 - Existing records are updated by name/mobile/upstreamId; new clients get an auto 4-digit payment code and an active subscription when the package matches.
 - Every run stores an `AutomationJob` record with the full report — nothing fails silently.
@@ -233,6 +233,7 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 - **Super Admin → Error** menu shows the log with a Copy button that formats the full error for pasting into an AI assistant.
 - Error logs are retained for 90 days; the status endpoint is restricted to the three staff roles and the error endpoints to the Super Admin only.
 - A 403 "administratively locked" response sets `upstream_lock_until` for 24 hours, blocking new login attempts and showing the lock in the status bar.
+- During the login cooldown the top Refresh button is replaced by a **Cooldown m:ss** countdown; clicking Refresh does not create a stuck waiting run.
 
 ## OTP request window (5 minutes)
 
