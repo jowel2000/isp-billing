@@ -31,6 +31,35 @@ export class SmsWebhookDto {
   @MaxLength(80)
   receivedAt?: string;
 
+  /** Exact SMS arrival time from the phone (ISO-8601 or local yyyy-MM-dd HH:mm:ss). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  smsReceivedAt?: string;
+
+  /** IANA timezone used when smsReceivedAt is a local timestamp. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  timezone?: string;
+
+  /** Stable per-SMS key computed by the phone; prevents duplicate forwarding. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  idempotencyKey?: string;
+
+  /** Optional phone-side OTP hint; the server still extracts and validates. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  otp?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  simSlot?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(80)

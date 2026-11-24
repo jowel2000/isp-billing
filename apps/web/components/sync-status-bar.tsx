@@ -28,6 +28,13 @@ function formatClock(value: string | null | undefined) {
   return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function formatDuration(totalSeconds: number) {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 export function SyncStatusBar() {
   const { user } = useLiveAuth();
   const { t } = useI18n();
@@ -95,6 +102,25 @@ export function SyncStatusBar() {
         ? t('sync.noSmsYet')
         : '';
 
+  const otpWindow = status?.otpWindow ?? null;
+  const windowVisible =
+    Boolean(otpWindow) &&
+    (step === 'waiting_otp' || step === 'verifying_otp' || step === 'sending_otp');
+  const remaining = otpWindow
+    ? Math.max(
+        0,
+        Math.ceil(
+          (new Date(otpWindow.expiresAt).getTime() - Date.now()) / 1000,
+        ),
+      )
+    : null;
+  const windowHint =
+    windowVisible && remaining !== null
+      ? remaining > 0
+        ? `${t('sync.otpRemaining')} ${formatDuration(remaining)}`
+        : t('sync.otpExpired')
+      : '';
+
   return (
     <div className={`sync-status-bar ${tone}`}>
       <span className="sync-status-dot" />
@@ -102,6 +128,7 @@ export function SyncStatusBar() {
 
       {detail ? <span className="sync-status-text">{detail}</span> : null}
       {lastSmsHint ? <span className="sync-status-text">{lastSmsHint}</span> : null}
+      {windowHint ? <span className="sync-status-window">{windowHint}</span> : null}
 
       {run?.status === 'running' ? (
         <span className="sync-status-progress">{Math.round(run.progress ?? 0)}%</span>

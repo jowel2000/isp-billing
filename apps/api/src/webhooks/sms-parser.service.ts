@@ -8,7 +8,17 @@ export interface ParsedSms {
   referenceCode: string | null;
   senderMobile: string | null;
   otpCode: string | null;
+  otpLike?: boolean;
+  otpReason?: string;
+  otpCandidates?: string[];
   blocked?: string;
+}
+
+interface OtpExtraction {
+  code: string | null;
+  reason?: 'OTP_NOT_FOUND' | 'OTP_AMBIGUOUS';
+  candidates?: string[];
+  confidence?: 'high' | 'low';
 }
 
 const BANGLA_DIGITS: Record<string, string> = {
@@ -24,8 +34,25 @@ const BANGLA_DIGITS: Record<string, string> = {
   '৯': '9',
 };
 
+const ARABIC_DIGITS: Record<string, string> = {
+  '٠': '0',
+  '١': '1',
+  '٢': '2',
+  '٣': '3',
+  '٤': '4',
+  '٥': '5',
+  '٦': '6',
+  '٧': '7',
+  '٨': '8',
+  '٩': '9',
+};
+
 function normalize(value: string): string {
-  return value.replace(/[০-৯]/g, (digit) => BANGLA_DIGITS[digit] ?? digit);
+  return value
+    .normalize('NFKC')
+    .replace(/[০-৯]/g, (digit) => BANGLA_DIGITS[digit] ?? digit)
+    .replace(/[٠-٩]/g, (digit) => ARABIC_DIGITS[digit] ?? digit)
+    .replace(/[‐‑‒–—−]/g, '-');
 }
 
 function firstMatch(source: string, patterns: RegExp[]): string | null {
@@ -34,6 +61,83 @@ function firstMatch(source: string, patterns: RegExp[]): string | null {
     if (match?.[1]) return match[1].trim();
   }
   return null;
+}
+
+/**
+ * Triangle sends both a 6-digit account/ID and a 6-digit OTP. The code next
+ * to an OTP keyword wins; a lone plausible candidate is accepted as a
+ * low-confidence fallback. Two or more candidates are never guessed.
+ */
+const OTP_KEYWORD = String.raw`(?:otp|o\.?t\.?p|one[\s-]*time(?:\s*(?:password|passcode|code|pin))?|verification\s*(?:code|pin)|login\s*(?:code|otp)|passcode|পাসওয়ার্ড|কোড|ওটিপি|যাচাই)`;
+
+const OTP_KEYWORD_RE = new RegExp(OTP_KEYWORD, 'iu');
+const OTP_NEAR = new RegExp(
+  `${OTP_KEYWORD}[^0-9]{0,40}?(?=[A-Z0-9]*\\d)([A-Z0-9]{4,8})(?![A-Z0-9])`,
+  'iu',
+);
+
+// 4–8 alphanumeric characters, at least one digit, not part of a longer token.
+const OTP_ANY = /(?<![A-Z0-9])(?=[A-Z0-9]*\d)[A-Z0-9]{4,8}(?![A-Z0-9])/gi;
+const OTP_SEPARATED = /(?<!\d)(\d{3})[ -](\d{3})(?!\d)/;
+
+function isYear(code: string): boolean {
+  return /^(19|20)\d{2}$/.test(code);
+}
+
+function isAmountNear(text: string, index: number): boolean {
+  const before = text.slice(Math.max(0, index - 32), index);
+  return /(?:BDT|Tk\.?|৳|amount|টাকা|paid|payment)\s*$/i.test(before);
+}
+
+function isPmtNear(text: string, index: number): boolean {
+  const before = text.slice(Math.max(0, index - 16), index);
+  return /(?:^|\s)pmt\s*#?\s*$/i.test(before);
+}
+
+export function extractOtpCode(body: string): OtpExtraction {
+  const text = normalize(body ?? '');
+
+  // 1) Code immediately after an OTP keyword wins (handles ID + OTP messages).
+  const near = OTP_NEAR.exec(text);
+  if (near?.[1]) {
+    const code = near[1].toUpperCase();
+    const codeIndex = (near.index ?? 0) + near[0].lastIndexOf(near[1]);
+    if (!isYear(code) && !isAmountNear(text, codeIndex) && !isPmtNear(text, codeIndex)) {
+      return { code, confidence: 'high' };
+    }
+  }
+
+  // 2) Separated digits near a keyword: "123 456" / "123-456".
+  if (OTP_KEYWORD_RE.test(text)) {
+    const separated = text.match(OTP_SEPARATED);
+    if (separated) {
+      const code = `${separated[1]}${separated[2]}`;
+      if (!isYear(code)) return { code, confidence: 'high' };
+    }
+  }
+
+  // 3) Exactly one plausible standalone candidate -> low confidence.
+  const candidates = [...text.matchAll(OTP_ANY)]
+    .map((match) => ({
+      code: match[0].toUpperCase(),
+      index: match.index ?? 0,
+    }))
+    .filter(
+      (candidate) =>
+        !isYear(candidate.code) &&
+        !isAmountNear(text, candidate.index) &&
+        !isPmtNear(text, candidate.index),
+    )
+    .map((candidate) => candidate.code);
+
+  const unique = [...new Set(candidates)];
+  if (unique.length === 1) {
+    return { code: unique[0], confidence: 'low' };
+  }
+  if (unique.length > 1) {
+    return { code: null, reason: 'OTP_AMBIGUOUS', candidates: unique };
+  }
+  return { code: null, reason: 'OTP_NOT_FOUND' };
 }
 
 /**
@@ -49,7 +153,11 @@ function isTriangleSender(sender: string): boolean {
 
 @Injectable()
 export class SmsParserService {
-  parse(rawBody: string, rawSender: string | null | undefined): ParsedSms {
+  parse(
+    rawBody: string,
+    rawSender: string | null | undefined,
+    otpWindowActive = false,
+  ): ParsedSms {
     const body = normalize(rawBody ?? '');
     const sender = normalize(rawSender ?? '');
     const source = `${sender} ${body}`;
@@ -69,33 +177,29 @@ export class SmsParserService {
       };
     }
 
-    const otpCode = firstMatch(body, [/\b(\d{6})\b/]);
+    const extraction = extractOtpCode(body);
     const looksLikeOtp =
       isTriangleSender(sender) ||
-      /(otp|verification code|কোড|ওটিপি|triangle)/i.test(source);
-    if (looksLikeOtp && otpCode) {
-      return {
-        kind: 'otp',
-        provider: 'triangle',
-        amountPaisa: null,
-        trxId: null,
-        referenceCode: null,
-        senderMobile: null,
-        otpCode,
-      };
-    }
+      /(otp|verification code|one[\s-]*time|triangle|পাসওয়ার্ড|কোড|ওটিপি|যাচাই)/i.test(
+        source,
+      );
+    const otpContext = looksLikeOtp || otpWindowActive;
 
-    // Safety: the Triangle number is OTP-only. Even if a "payment received"
-    // style message ever arrives from it, it must NEVER be treated as a payment.
-    if (isTriangleSender(sender)) {
+    const triangle = isTriangleSender(sender);
+
+    if (triangle) {
+      // Safety: the Triangle number is OTP-only. It must NEVER be a payment.
       return {
-        kind: 'unknown',
+        kind: otpContext && extraction.code ? 'otp' : 'unknown',
         provider: 'triangle',
         amountPaisa: null,
         trxId: null,
         referenceCode: null,
         senderMobile: null,
-        otpCode: null,
+        otpCode: extraction.code,
+        otpLike: true,
+        otpReason: extraction.code ? undefined : extraction.reason,
+        otpCandidates: extraction.candidates,
       };
     }
 
@@ -112,7 +216,35 @@ export class SmsParserService {
     ]);
     const senderMobile = this.extractMobile(body);
 
-    if (!amount && !trxId) {
+    // A real payment message wins over the generic "any 6-digit code while an
+    // OTP window is active" rule.
+    if (amount && trxId) {
+      const taka = Number(amount.replace(/,/g, ''));
+      return {
+        kind: 'payment',
+        provider,
+        amountPaisa: taka > 0 ? Math.round(taka * 100) : null,
+        trxId,
+        referenceCode,
+        senderMobile,
+        otpCode: null,
+      };
+    }
+
+    if (otpContext && extraction.code) {
+      return {
+        kind: 'otp',
+        provider: 'triangle',
+        amountPaisa: null,
+        trxId: null,
+        referenceCode: null,
+        senderMobile: null,
+        otpCode: extraction.code,
+        otpLike: true,
+      };
+    }
+
+    if (otpContext) {
       return {
         kind: 'unknown',
         provider,
@@ -121,15 +253,33 @@ export class SmsParserService {
         referenceCode,
         senderMobile,
         otpCode: null,
+        otpLike: true,
+        otpReason: extraction.reason,
+        otpCandidates: extraction.candidates,
       };
     }
 
-    const taka = amount ? Number(amount.replace(/,/g, '')) : 0;
+    // Preserve the existing payment-inbox behavior: an amount or a Trx ID is
+    // enough to classify it as a payment; handlePayment reports the missing
+    // field for manual review.
+    if (amount || trxId) {
+      const taka = amount ? Number(amount.replace(/,/g, '')) : 0;
+      return {
+        kind: 'payment',
+        provider,
+        amountPaisa: taka > 0 ? Math.round(taka * 100) : null,
+        trxId,
+        referenceCode,
+        senderMobile,
+        otpCode: null,
+      };
+    }
+
     return {
-      kind: 'payment',
+      kind: 'unknown',
       provider,
-      amountPaisa: taka > 0 ? Math.round(taka * 100) : null,
-      trxId,
+      amountPaisa: null,
+      trxId: null,
       referenceCode,
       senderMobile,
       otpCode: null,

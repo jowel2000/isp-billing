@@ -536,11 +536,21 @@ export interface SyncRunRecord {
   lastError: string | null;
 }
 
+export interface SyncOtpWindow {
+  id: string;
+  status: 'pending' | 'verifying' | string;
+  trigger: string;
+  requestedAt: string;
+  expiresAt: string;
+  secondsRemaining: number;
+}
+
 export interface SyncStatusResponse {
   run: SyncRunRecord | null;
   errorCount: number;
   lockUntil: string | null;
   lastSmsAt?: string | null;
+  otpWindow?: SyncOtpWindow | null;
 }
 
 export function getSyncStatus() {

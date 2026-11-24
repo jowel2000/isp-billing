@@ -13,7 +13,7 @@ export type SyncStep =
   | 'failed';
 
 const STALE_RUN_MS = 10 * 60 * 1000;
-const OTP_WAIT_MS = 4 * 60 * 1000;
+const OTP_WAIT_MS = 5 * 60 * 1000;
 const RETENTION_DAYS = 90;
 const LOCK_KEY = 'upstream_lock_until';
 
@@ -227,7 +227,7 @@ export class SyncStatusService implements OnModuleInit {
     // or running for too long, and record the reason.
     await this.expireStuck(tenantId);
 
-    const [run, errorCount, lockUntil, lastSms] = await Promise.all([
+    const [run, errorCount, lockUntil, lastSms, otpWindow] = await Promise.all([
       this.prisma.syncRun.findFirst({
         where: { tenantId },
         orderBy: { startedAt: 'desc' },
@@ -238,6 +238,10 @@ export class SyncStatusService implements OnModuleInit {
         where: { success: true },
         orderBy: { createdAt: 'desc' },
         select: { createdAt: true },
+      }),
+      this.prisma.otpWindow.findFirst({
+        where: { tenantId, status: { in: ['pending', 'verifying'] } },
+        orderBy: { requestedAt: 'desc' },
       }),
     ]);
 
@@ -251,10 +255,48 @@ export class SyncStatusService implements OnModuleInit {
       errorCount,
       lockUntil,
       lastSmsAt: lastSms?.createdAt ?? null,
+      otpWindow: otpWindow
+        ? {
+            id: otpWindow.id,
+            status: otpWindow.status,
+            trigger: otpWindow.trigger,
+            requestedAt: otpWindow.requestedAt,
+            expiresAt: otpWindow.expiresAt,
+            secondsRemaining: Math.max(
+              0,
+              Math.ceil((otpWindow.expiresAt.getTime() - Date.now()) / 1000),
+            ),
+          }
+        : null,
     };
   }
 
   private async expireStuck(tenantId: string) {
+    const now = new Date();
+
+    // OTP-window housekeeping (kept here to avoid a module cycle with the
+    // UpstreamModule's OtpWindowService).
+    await this.prisma.otpWindow.updateMany({
+      where: { tenantId, status: 'pending', expiresAt: { lt: now } },
+      data: {
+        status: 'expired',
+        lastError: 'OTP window expired',
+        verifyingUntil: null,
+      },
+    });
+    await this.prisma.otpWindow.updateMany({
+      where: { tenantId, status: 'verifying', expiresAt: { lt: now } },
+      data: {
+        status: 'expired',
+        lastError: 'OTP window expired during verification',
+        verifyingUntil: null,
+      },
+    });
+    await this.prisma.otpWindow.updateMany({
+      where: { tenantId, status: 'verifying', verifyingUntil: { lt: now } },
+      data: { status: 'pending', verifyingUntil: null },
+    });
+
     const waiting = await this.prisma.syncRun.findFirst({
       where: {
         tenantId,
@@ -265,13 +307,25 @@ export class SyncStatusService implements OnModuleInit {
       orderBy: { startedAt: 'asc' },
     });
     if (waiting) {
-      await this.fail(waiting.id, tenantId, {
-        step: 'waiting_otp',
-        code: 'OTP_TIMEOUT',
-        message: 'OTP SMS did not reach the server within 4 minutes',
-        detail:
-          'No webhook request was received from the phone. Check that MacroDroid is enabled, battery optimization is off, auto-start is allowed, and the SMS trigger uses Any Number / Any content.',
+      // If a window is still open, keep waiting even when the run itself is a
+      // little older than 5 minutes (the upstream login may have taken time).
+      const activeWindow = await this.prisma.otpWindow.findFirst({
+        where: { tenantId, status: { in: ['pending', 'verifying'] } },
+        orderBy: { requestedAt: 'desc' },
       });
+      const windowStillOpen = activeWindow
+        ? activeWindow.expiresAt.getTime() > now.getTime()
+        : false;
+
+      if (!windowStillOpen) {
+        await this.fail(waiting.id, tenantId, {
+          step: 'waiting_otp',
+          code: 'OTP_TIMEOUT',
+          message: 'OTP SMS did not reach the server within 5 minutes',
+          detail:
+            'No valid webhook request was received from the phone inside the OTP window. Check that MacroDroid is enabled, battery optimization is off, auto-start is allowed, the trigger uses Any Number / Any Content, and the SMS timestamp is sent correctly.',
+        });
+      }
     }
 
     const stale = await this.prisma.syncRun.findFirst({

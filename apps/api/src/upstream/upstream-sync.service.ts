@@ -14,6 +14,7 @@ import {
 import { decryptString, encryptString } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { SyncStatusService } from '../sync/sync-status.service';
+import { OtpWindowService } from './otp-window.service';
 
 interface SyncReport {
   status: 'completed' | 'otp_required' | 'failed' | 'busy' | 'locked';
@@ -110,6 +111,7 @@ export class UpstreamSyncService implements OnModuleInit {
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly syncStatus: SyncStatusService,
+    private readonly otpWindows: OtpWindowService,
   ) {}
 
   onModuleInit() {
@@ -219,6 +221,7 @@ export class UpstreamSyncService implements OnModuleInit {
     tenantId: string,
     client: TriangleClient,
     runId?: string | null,
+    meta: { trigger: 'manual' | 'auto'; userId?: string } = { trigger: 'manual' },
   ): Promise<'ok' | 'otp_required'> {
     // Expire stale pending sessions (older than 7 days) so they do not pile up.
     await this.prisma.upstreamSession
@@ -261,6 +264,22 @@ export class UpstreamSyncService implements OnModuleInit {
       orderBy: { createdAt: 'desc' },
     });
     if (pending && Date.now() - pending.createdAt.getTime() < PENDING_OTP_TTL_MS) {
+      // A pending session from before the OTP-window feature has no window.
+      // Reconstruct it from the original request time so a forwarded OTP is
+      // not rejected with OTP_NO_WINDOW.
+      await this.otpWindows.recoverStale(tenantId);
+      const activeWindow = await this.prisma.otpWindow.findFirst({
+        where: { tenantId, status: 'pending' },
+        orderBy: { requestedAt: 'desc' },
+      });
+      if (!activeWindow) {
+        await this.otpWindows.start(
+          tenantId,
+          { trigger: meta.trigger, userId: meta.userId },
+          pending.createdAt,
+        );
+      }
+
       if (runId) {
         await this.syncStatus.step(
           runId,
@@ -290,8 +309,23 @@ export class UpstreamSyncService implements OnModuleInit {
     if (runId) {
       await this.syncStatus.step(runId, 'sending_otp', 'Sending OTP...', 10);
     }
+
+    // Record the exact OTP request time BEFORE the upstream call so the
+    // acceptance window starts at the moment the OTP is requested. A newer
+    // Refresh/auto-send supersedes this window.
+    const window = await this.otpWindows.start(tenantId, {
+      trigger: meta.trigger,
+      userId: meta.userId,
+    });
+
     const { username, password } = this.credentials;
-    const login = await client.login(username, password);
+    let login;
+    try {
+      login = await client.login(username, password);
+    } catch (error) {
+      await this.otpWindows.fail(window.id, (error as Error).message);
+      throw error;
+    }
     await this.rememberLoginAttempt(tenantId);
 
     if (login.otpRequired) {
@@ -305,6 +339,8 @@ export class UpstreamSyncService implements OnModuleInit {
       return 'otp_required';
     }
 
+    // Login succeeded without an OTP (upstream session was still valid).
+    await this.otpWindows.supersede(tenantId, 'session_reused');
     await this.saveActiveSession(tenantId, client);
     return 'ok';
   }
@@ -367,7 +403,10 @@ export class UpstreamSyncService implements OnModuleInit {
       const client = this.newClient();
 
       await this.syncStatus.step(run.id, 'sending_otp', 'Sending OTP...', 10);
-      const state = await this.ensureSession(tenantId, client, run.id);
+      const state = await this.ensureSession(tenantId, client, run.id, {
+        trigger: meta.trigger ?? 'manual',
+        userId: meta.userId,
+      });
 
       if (state !== 'ok') {
         await this.syncStatus.step(
@@ -520,11 +559,15 @@ export class UpstreamSyncService implements OnModuleInit {
    * Called when a forwarded SMS contains an OTP: verifies it with Triangle,
    * saves the session and immediately scrapes + updates all data.
    */
-  async completeLoginAndSync(tenantId: string) {
+  async completeLoginAndSync(tenantId: string, windowId?: string) {
     if (this.busy.has(tenantId)) return { status: 'busy' as const };
     this.busy.add(tenantId);
     let runId: string | null = null;
+    let activeWindow: { id: string; attempts: number } | null = null;
+
     try {
+      await this.otpWindows.recoverStale(tenantId);
+
       const running = await this.syncStatus.findRunning(tenantId);
       const run = running ?? (await this.syncStatus.start(tenantId, 'otp')).run;
       runId = run.id;
@@ -540,25 +583,113 @@ export class UpstreamSyncService implements OnModuleInit {
         where: { tenantId, status: 'pending_otp' },
         orderBy: { createdAt: 'desc' },
       });
-      const otpRow = await this.prisma.otpRequest.findFirst({
-        where: {
-          tenantId,
-          context: 'triangle_login',
-          status: 'pending',
-          expiresAt: { gt: new Date() },
-        },
-        orderBy: { requestedAt: 'desc' },
-        select: { id: true, codeEnc: true },
-      });
 
-      if (!pending?.cookieEnc || !otpRow?.codeEnc) {
+      // Prefer the OTP attached to the claimed window. Fall back to the legacy
+      // OtpRequest row ONLY for legacy callers that did not pass a windowId.
+      let otpCode: string | null = null;
+      let windowBlocked:
+        | { code: string; status: 'expired' | 'superseded' }
+        | null = null;
+
+      if (windowId) {
+        let window = await this.otpWindows.byId(tenantId, windowId);
+        if (window?.status === 'pending') {
+          const claimed = await this.otpWindows.claim(window.id);
+          if (claimed) window = await this.otpWindows.byId(tenantId, window.id);
+        }
+
+        if (window && window.status === 'verifying') {
+          activeWindow = { id: window.id, attempts: window.attempts };
+          const sms = await this.prisma.smsInbound.findFirst({
+            where: {
+              tenantId,
+              otpWindowId: window.id,
+              kind: 'otp',
+              status: 'otp',
+              otpCode: { not: null },
+            },
+            orderBy: { createdAt: 'desc' },
+            select: { otpCode: true },
+          });
+          otpCode = sms?.otpCode ?? null;
+        } else {
+          const code =
+            window?.status === 'expired'
+              ? 'OTP_EXPIRED'
+              : window?.status === 'consumed'
+                ? 'OTP_ALREADY_CONSUMED'
+                : window?.status === 'failed'
+                  ? 'OTP_WINDOW_FAILED'
+                  : 'OTP_SUPERSEDED';
+          windowBlocked = {
+            code,
+            status: code === 'OTP_EXPIRED' ? 'expired' : 'superseded',
+          };
+        }
+      }
+
+      let legacyOtpId: string | null = null;
+      if (!otpCode && !windowId) {
+        const otpRow = await this.prisma.otpRequest.findFirst({
+          where: {
+            tenantId,
+            context: 'triangle_login',
+            status: 'pending',
+            expiresAt: { gt: new Date() },
+          },
+          orderBy: { requestedAt: 'desc' },
+          select: { id: true, codeEnc: true },
+        });
+        if (otpRow?.codeEnc) {
+          otpCode = decryptString(otpRow.codeEnc);
+          legacyOtpId = otpRow.id;
+        }
+      }
+
+      if (windowBlocked) {
+        await this.syncStatus.fail(runId, tenantId, {
+          step: 'verifying_otp',
+          code: windowBlocked.code,
+          message:
+            windowBlocked.code === 'OTP_EXPIRED'
+              ? 'OTP window expired before verification'
+              : 'A newer OTP request superseded this one',
+        });
+        return { status: windowBlocked.status, error: windowBlocked.code };
+      }
+
+      if (!pending?.cookieEnc || !otpCode) {
         const input = {
           step: 'verifying_otp',
           code: 'OTP_MISSING',
           message: 'No pending OTP or pending login session found',
         };
         await this.syncStatus.fail(runId, tenantId, input);
+        if (activeWindow) {
+          await this.otpWindows.fail(activeWindow.id, input.message);
+        }
         return { status: 'nothing_to_do' as const, error: input.code };
+      }
+
+      if (activeWindow) {
+        const window = await this.otpWindows.byId(tenantId, activeWindow.id);
+        if (!window || window.status !== 'verifying') {
+          await this.syncStatus.fail(runId, tenantId, {
+            step: 'verifying_otp',
+            code: 'OTP_SUPERSEDED',
+            message: 'A newer OTP request superseded this one',
+          });
+          return { status: 'superseded' as const, error: 'OTP_SUPERSEDED' };
+        }
+        if (window.expiresAt.getTime() <= Date.now()) {
+          await this.otpWindows.fail(window.id, 'OTP window expired');
+          await this.syncStatus.fail(runId, tenantId, {
+            step: 'verifying_otp',
+            code: 'OTP_EXPIRED',
+            message: 'OTP window expired before verification',
+          });
+          return { status: 'expired' as const, error: 'OTP_EXPIRED' };
+        }
       }
 
       const envelope = this.parseSessionEnvelope(pending.cookieEnc);
@@ -570,15 +701,57 @@ export class UpstreamSyncService implements OnModuleInit {
       // the upstream returns 422 "username/password required".
       client.restoreCredentials(this.credentials.username, this.credentials.password);
 
-      // Verify first; only consume the OTP after the upstream accepts it.
-      await client.verifyOtp(decryptString(otpRow.codeEnc));
+      // One transient retry (network/5xx). A 511 means the OTP is invalid and
+      // must not be retried.
+      let verified = false;
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await client.verifyOtp(otpCode);
+          verified = true;
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+          const status = (error as { status?: number })?.status;
+          const transient = !status || status >= 500;
+          if (!transient || attempt === 1) break;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+      if (!verified) throw lastError ?? new Error('OTP verification failed');
 
       await this.syncStatus.step(runId, 'login_success', 'Login successful', 35);
 
-      await this.prisma.otpRequest.update({
-        where: { id: otpRow.id },
-        data: { status: 'responded', respondedAt: new Date() },
-      });
+      // Atomically consume the window. If a newer Refresh superseded it while
+      // the upstream call was in flight, abort without saving the session.
+      if (activeWindow) {
+        const consumed = await this.otpWindows.consume(activeWindow.id);
+        if (!consumed) {
+          await this.syncStatus.fail(runId, tenantId, {
+            step: 'verifying_otp',
+            code: 'OTP_SUPERSEDED',
+            message: 'A newer OTP request superseded this one during verification',
+          });
+          return { status: 'superseded' as const, error: 'OTP_SUPERSEDED' };
+        }
+
+        await this.prisma.otpRequest.updateMany({
+          where: {
+            tenantId,
+            otpWindowId: activeWindow.id,
+            status: 'pending',
+          },
+          data: { status: 'responded', respondedAt: new Date() },
+        });
+      }
+
+      if (legacyOtpId) {
+        await this.prisma.otpRequest.update({
+          where: { id: legacyOtpId },
+          data: { status: 'responded', respondedAt: new Date() },
+        });
+      }
 
       await this.prisma.upstreamSession.update({
         where: { id: pending.id },
@@ -636,6 +809,24 @@ export class UpstreamSyncService implements OnModuleInit {
       if (mapped.code === 'UPSTREAM_LOCKED') {
         await this.syncStatus.lockPanel(tenantId, 24);
       }
+
+      if (activeWindow) {
+        if (
+          mapped.code === 'HTTP_511' ||
+          mapped.code === 'OTP_422' ||
+          mapped.code === 'UPSTREAM_LOCKED'
+        ) {
+          await this.otpWindows.fail(activeWindow.id, mapped.message);
+        } else {
+          // Transient failure: return the window to pending so a retry (or a
+          // second SMS) can still use it until the 5-minute window expires.
+          const released = await this.otpWindows.release(activeWindow.id);
+          if (!released) {
+            await this.otpWindows.fail(activeWindow.id, mapped.message);
+          }
+        }
+      }
+
       await this.syncStatus.fail(runId, tenantId, mapped);
 
       // Persist the failure — including the upstream validation body — so the
@@ -1148,7 +1339,7 @@ export class UpstreamSyncService implements OnModuleInit {
           });
           for (const tenant of tenants) {
             try {
-              const report = await this.sync(tenant.id);
+              const report = await this.sync(tenant.id, {}, { trigger: 'auto' });
               this.logger.log(
                 `Scheduled sync ${time} for ${tenant.id}: ${report.status} (clients ${report.clients.fetched} fetched)`,
               );

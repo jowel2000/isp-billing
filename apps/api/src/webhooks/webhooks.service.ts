@@ -6,14 +6,74 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHash, createHmac } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import type { AuthUser } from '../auth/types/auth-user';
 import { encryptString } from '../common/crypto';
 import { OtpStore } from '../upstream/otp.store';
+import { OtpWindowService } from '../upstream/otp-window.service';
 import { UpstreamSyncService } from '../upstream/upstream-sync.service';
 import { PaymentsService } from '../payments/payments.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SmsWebhookDto } from './dto/sms-webhook.dto';
 import { ParsedSms, SmsParserService } from './sms-parser.service';
+
+const CLOCK_SKEW_TOLERANCE_MS = 90_000;
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function bucket30s(date: Date): string {
+  return new Date(Math.floor(date.getTime() / 30_000) * 30_000).toISOString();
+}
+
+/**
+ * Accepts ISO-8601 (with Z/offset) or MacroDroid's local
+ * "yyyy-MM-dd HH:mm:ss" (Asia/Dhaka, UTC+6, no DST).
+ */
+function parseDeviceTimestamp(value?: string): Date | null {
+  if (!value) return null;
+  const raw = value.trim();
+
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(raw)) {
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const local = raw.match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/,
+  );
+  if (local) {
+    const [, y, mo, d, h, mi, s] = local;
+    return new Date(
+      Date.UTC(
+        Number(y),
+        Number(mo) - 1,
+        Number(d),
+        Number(h) - 6,
+        Number(mi),
+        Number(s ?? '0'),
+      ),
+    );
+  }
+
+  const fallback = new Date(raw);
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
+}
+
+/**
+ * Device time is used only when the phone clock is plausible; otherwise the
+ * server receipt time is authoritative (phone clocks/timezones are unreliable).
+ */
+function resolveReceivedAt(server: Date, device: Date | null) {
+  if (!device) return { at: server, skewMs: 0, source: 'server' as const };
+
+  const skewMs = device.getTime() - server.getTime();
+  if (Math.abs(skewMs) > CLOCK_SKEW_TOLERANCE_MS) {
+    return { at: server, skewMs, source: 'server' as const };
+  }
+  return { at: device, skewMs, source: 'device' as const };
+}
 
 @Injectable()
 export class WebhooksService {
@@ -23,6 +83,7 @@ export class WebhooksService {
     private readonly prisma: PrismaService,
     private readonly parser: SmsParserService,
     private readonly otpStore: OtpStore,
+    private readonly otpWindows: OtpWindowService,
     private readonly payments: PaymentsService,
     private readonly upstreamSync: UpstreamSyncService,
   ) {}
@@ -62,15 +123,26 @@ export class WebhooksService {
     const sender = (dto.sender ?? dto.from)?.trim() || null;
     if (!body) return { accepted: false, reason: 'empty_message' };
 
-    const receivedAt = dto.receivedAt ? new Date(dto.receivedAt) : null;
+    const serverReceivedAt = new Date();
+    const deviceReceivedAt = parseDeviceTimestamp(dto.smsReceivedAt ?? dto.receivedAt);
+    const { at: receivedAt, skewMs } = resolveReceivedAt(
+      serverReceivedAt,
+      deviceReceivedAt,
+    );
+
     // The signature contract hashes the RAW fields exactly as the phone sent
     // them (empty string when omitted), so the client can reproduce the hash.
     const rawSender = dto.sender ?? dto.from ?? '';
     const rawBody = dto.message ?? dto.body ?? dto.text ?? '';
-    const rawReceivedAt = dto.receivedAt ?? '';
-    const bodyHash = createHash('sha256')
-      .update(`${rawSender}|${rawBody}|${rawReceivedAt}`)
-      .digest('hex');
+    const rawReceivedAt = dto.smsReceivedAt ?? dto.receivedAt ?? '';
+    const bodyHash = sha256(`${rawSender}|${rawBody}|${rawReceivedAt}`);
+    const idempotencyKey =
+      dto.idempotencyKey?.trim() ||
+      sha256(
+        `${dto.deviceId ?? ''}|${rawSender}|${
+          rawReceivedAt || bucket30s(serverReceivedAt)
+        }|${rawBody}`,
+      );
 
     // Replay protection: a nonce may only be used once per tenant.
     if (dto.nonce) {
@@ -99,8 +171,9 @@ export class WebhooksService {
       }
     }
 
+    // Idempotency: the same forwarded SMS is accepted once.
     const duplicate = await this.prisma.smsInbound.findUnique({
-      where: { tenantId_bodyHash: { tenantId: tenant.id, bodyHash } },
+      where: { tenantId_idempotencyKey: { tenantId: tenant.id, idempotencyKey } },
     });
     if (duplicate) {
       return {
@@ -108,103 +181,92 @@ export class WebhooksService {
         duplicate: true,
         smsId: duplicate.id,
         status: duplicate.status,
+        reason: duplicate.rejectionReason ?? undefined,
       };
     }
 
-    let parsed = this.parser.parse(body, sender);
+    // Expire stale windows before deciding whether an OTP is acceptable.
+    await this.otpWindows.recoverStale(tenant.id);
 
-    // An upstream login may be waiting for an OTP that arrives from ANY
-    // number (not only the Triangle sender). Accept any 6-digit code as the
-    // login OTP while a login is pending; the pmt block rule still applies.
-    if (parsed.kind !== 'otp' && !parsed.blocked) {
-      const pendingLogin = await this.prisma.upstreamSession.findFirst({
-        where: { tenantId: tenant.id, status: 'pending_otp' },
-        orderBy: { createdAt: 'desc' },
-      });
-      if (pendingLogin) {
-        const code = body.match(/\b(\d{6})\b/);
-        if (code) {
-          parsed = {
-            ...parsed,
-            kind: 'otp',
-            provider: 'triangle',
-            otpCode: code[1],
-          };
-        }
-      }
-    }
+    const latestWindow = await this.prisma.otpWindow.findFirst({
+      where: { tenantId: tenant.id },
+      orderBy: { requestedAt: 'desc' },
+    });
+    const activeWindow = latestWindow?.status === 'pending' ? latestWindow : null;
 
-    let record;
-    try {
-      record = await this.prisma.smsInbound.create({
-        data: {
-          tenantId: tenant.id,
-          sender,
-          body,
-          bodyHash,
-          nonce: dto.nonce ?? null,
-          kind: parsed.kind,
-          provider: parsed.provider,
-          amountPaisa: parsed.amountPaisa ?? null,
-          trxId: parsed.trxId,
-          referenceCode: parsed.referenceCode,
-          senderMobile: parsed.senderMobile,
-          otpCode: parsed.otpCode,
-          receivedAt,
-        },
-      });
-    } catch (error: any) {
-      if (error?.code === 'P2002') {
-        return { accepted: false, duplicate: true, reason: 'already-stored' };
-      }
-      throw error;
-    }
+    const parsed = this.parser.parse(body, sender, Boolean(activeWindow));
 
     if (parsed.blocked) {
-      await this.prisma.smsInbound.update({
-        where: { id: record.id },
-        data: { status: 'ignored', error: `Blocked: ${parsed.blocked}` },
+      const record = await this.storeSms({
+        tenantId: tenant.id,
+        sender,
+        body,
+        bodyHash,
+        idempotencyKey,
+        nonce: dto.nonce ?? null,
+        kind: 'unknown',
+        provider: null,
+        amountPaisa: null,
+        trxId: null,
+        referenceCode: null,
+        senderMobile: null,
+        otpCode: null,
+        status: 'ignored',
+        error: `Blocked: ${parsed.blocked}`,
+        receivedAt,
+        smsReceivedAt: deviceReceivedAt,
+        serverReceivedAt,
+        clockSkewMs: Math.round(skewMs),
+        otpWindowId: null,
       });
       return {
         accepted: true,
         ignored: true,
         reason: parsed.blocked,
-        smsId: record.id,
+        smsId: record?.id ?? undefined,
       };
     }
 
-    if (parsed.kind === 'otp' && parsed.otpCode) {
-      // Keep it in memory for the in-process worker AND persist an encrypted,
-      // short-lived copy in the DB so it survives restarts.
-      this.otpStore.set('default', parsed.otpCode);
-      const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-      await this.prisma.otpRequest.create({
-        data: {
-          tenantId: tenant.id,
-          context: 'triangle_login',
-          codeHash: createHash('sha256').update(parsed.otpCode).digest('hex'),
-          codeEnc: encryptString(parsed.otpCode),
-          expiresAt,
-        },
+    if (parsed.otpLike) {
+      return this.handleOtpMessage(tenant.id, dto, {
+        body,
+        sender,
+        bodyHash,
+        idempotencyKey,
+        serverReceivedAt,
+        deviceReceivedAt,
+        receivedAt,
+        skewMs,
+        latestWindow,
+        activeWindow,
+        parsed,
       });
+    }
 
-      // The forwarded OTP completes the pending upstream login automatically:
-      // verify OTP → save session → scrape → update local data.
-      void this.upstreamSync
-        .completeLoginAndSync(tenant.id)
-        .catch((error) => this.logger.warn(`OTP login completion failed: ${error.message}`));
+    const record = await this.storeSms({
+      tenantId: tenant.id,
+      sender,
+      body,
+      bodyHash,
+      idempotencyKey,
+      nonce: dto.nonce ?? null,
+      kind: parsed.kind,
+      provider: parsed.provider,
+      amountPaisa: parsed.amountPaisa ?? null,
+      trxId: parsed.trxId,
+      referenceCode: parsed.referenceCode,
+      senderMobile: parsed.senderMobile,
+      otpCode: null,
+      status: 'new',
+      receivedAt,
+      smsReceivedAt: deviceReceivedAt,
+      serverReceivedAt,
+      clockSkewMs: Math.round(skewMs),
+      otpWindowId: null,
+    });
 
-      await this.prisma.smsInbound.update({
-        where: { id: record.id },
-        data: { status: 'otp' },
-      });
-      return {
-        accepted: true,
-        smsId: record.id,
-        kind: 'otp',
-        status: 'otp',
-        expiresAt: expiresAt.toISOString(),
-      };
+    if (!record) {
+      return { accepted: false, duplicate: true, reason: 'already-stored' };
     }
 
     if (parsed.kind !== 'payment') {
@@ -212,6 +274,215 @@ export class WebhooksService {
     }
 
     return this.handlePayment(tenant.id, record.id, parsed);
+  }
+
+  private async handleOtpMessage(
+    tenantId: string,
+    dto: SmsWebhookDto,
+    ctx: {
+      body: string;
+      sender: string | null;
+      bodyHash: string;
+      idempotencyKey: string;
+      serverReceivedAt: Date;
+      deviceReceivedAt: Date | null;
+      receivedAt: Date;
+      skewMs: number;
+      latestWindow: {
+        id: string;
+        status: string;
+        requestedAt: Date;
+        expiresAt: Date;
+      } | null;
+      activeWindow: {
+        id: string;
+        requestedAt: Date;
+        expiresAt: Date;
+      } | null;
+      parsed: ParsedSms;
+    },
+  ) {
+    const {
+      body,
+      sender,
+      bodyHash,
+      idempotencyKey,
+      serverReceivedAt,
+      deviceReceivedAt,
+      receivedAt,
+      skewMs,
+      latestWindow,
+      activeWindow,
+      parsed,
+    } = ctx;
+
+    const reject = async (reason: string, windowId?: string | null) => {
+      const record = await this.storeSms({
+        tenantId,
+        sender,
+        body,
+        bodyHash,
+        idempotencyKey,
+        nonce: dto.nonce ?? null,
+        kind: parsed.otpCode ? 'otp' : 'unknown',
+        provider: parsed.provider,
+        amountPaisa: null,
+        trxId: null,
+        referenceCode: null,
+        senderMobile: null,
+        // Never persist a rejected OTP code.
+        otpCode: null,
+        status: 'rejected',
+        rejectionReason: reason,
+        receivedAt,
+        smsReceivedAt: deviceReceivedAt,
+        serverReceivedAt,
+        clockSkewMs: Math.round(skewMs),
+        otpWindowId: windowId ?? null,
+      });
+
+      if (!record) {
+        const existing = await this.prisma.smsInbound.findUnique({
+          where: { tenantId_idempotencyKey: { tenantId, idempotencyKey } },
+        });
+        return {
+          accepted: false,
+          duplicate: true,
+          reason,
+          smsId: existing?.id ?? null,
+        };
+      }
+
+      return { accepted: false, reason, smsId: record.id };
+    };
+
+    if (!latestWindow) return reject('OTP_NO_WINDOW');
+
+    if (latestWindow.status === 'superseded') {
+      return reject('OTP_SUPERSEDED', latestWindow.id);
+    }
+    if (latestWindow.status === 'consumed') {
+      return reject('OTP_ALREADY_CONSUMED', latestWindow.id);
+    }
+    if (latestWindow.status === 'failed') {
+      return reject('OTP_WINDOW_FAILED', latestWindow.id);
+    }
+    if (latestWindow.status === 'expired') {
+      return reject('OTP_EXPIRED', latestWindow.id);
+    }
+
+    if (!activeWindow) {
+      if (latestWindow.expiresAt.getTime() <= serverReceivedAt.getTime()) {
+        return reject('OTP_EXPIRED', latestWindow.id);
+      }
+      return reject('OTP_ALREADY_CLAIMED', latestWindow.id);
+    }
+
+    if (receivedAt.getTime() < activeWindow.requestedAt.getTime()) {
+      return reject('OTP_TOO_EARLY', activeWindow.id);
+    }
+
+    if (receivedAt.getTime() >= activeWindow.expiresAt.getTime()) {
+      await this.otpWindows.expire(activeWindow.id, 'OTP_EXPIRED');
+      return reject('OTP_EXPIRED', activeWindow.id);
+    }
+
+    if (!parsed.otpCode) {
+      return reject(parsed.otpReason ?? 'OTP_NOT_FOUND', activeWindow.id);
+    }
+
+    if (dto.otp && dto.otp.trim().toUpperCase() !== parsed.otpCode) {
+      return reject('OTP_HINT_MISMATCH', activeWindow.id);
+    }
+
+    const record = await this.storeSms({
+      tenantId,
+      sender,
+      body,
+      bodyHash,
+      idempotencyKey,
+      nonce: dto.nonce ?? null,
+      kind: 'otp',
+      provider: 'triangle',
+      amountPaisa: null,
+      trxId: null,
+      referenceCode: null,
+      senderMobile: null,
+      otpCode: parsed.otpCode,
+      status: 'otp',
+      receivedAt,
+      smsReceivedAt: deviceReceivedAt,
+      serverReceivedAt,
+      clockSkewMs: Math.round(skewMs),
+      otpWindowId: activeWindow.id,
+    });
+
+    if (!record) {
+      const existing = await this.prisma.smsInbound.findUnique({
+        where: { tenantId_idempotencyKey: { tenantId, idempotencyKey } },
+      });
+      return {
+        accepted: true,
+        duplicate: true,
+        smsId: existing?.id ?? null,
+        status: existing?.status,
+      };
+    }
+
+    // Only one SMS can claim the window. A newer Refresh may have superseded
+    // it between the read and this update.
+    const claimed = await this.otpWindows.claim(activeWindow.id);
+    if (!claimed) {
+      await this.prisma.smsInbound.update({
+        where: { id: record.id },
+        data: { status: 'rejected', rejectionReason: 'OTP_SUPERSEDED' },
+      });
+      return { accepted: false, reason: 'OTP_SUPERSEDED', smsId: record.id };
+    }
+
+    // Encrypted short-lived copy for diagnostics/backward compatibility.
+    await this.prisma.otpRequest.create({
+      data: {
+        tenantId,
+        context: 'triangle_login',
+        status: 'pending',
+        requestedAt: activeWindow.requestedAt,
+        expiresAt: activeWindow.expiresAt,
+        codeHash: sha256(parsed.otpCode),
+        codeEnc: encryptString(parsed.otpCode),
+        otpWindowId: activeWindow.id,
+      },
+    });
+
+    this.otpStore.set('default', parsed.otpCode);
+
+    void this.upstreamSync
+      .completeLoginAndSync(tenantId, activeWindow.id)
+      .catch((error) =>
+        this.logger.warn(`OTP login completion failed: ${error.message}`),
+      );
+
+    return {
+      accepted: true,
+      smsId: record.id,
+      windowId: activeWindow.id,
+      kind: 'otp',
+      status: 'otp',
+      expiresAt: activeWindow.expiresAt.toISOString(),
+      receivedAt: receivedAt.toISOString(),
+    };
+  }
+
+  private async storeSms(
+    data: Prisma.SmsInboundUncheckedCreateInput,
+  ) {
+    try {
+      return await this.prisma.smsInbound.create({ data });
+    } catch (error: any) {
+      // Idempotency/nonce race: the other request already stored it.
+      if (error?.code === 'P2002') return null;
+      throw error;
+    }
   }
 
   private async handlePayment(

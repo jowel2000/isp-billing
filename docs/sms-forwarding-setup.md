@@ -22,19 +22,44 @@ Body (JSON):
 
 ```json
 {
+  "deviceId": "redmi-note-14-pro-5g",
   "sender": "Triangle",
   "message": "Your login OTP is 123456",
-  "receivedAt": "2026-11-22T06:00:00.000Z"
+  "smsReceivedAt": "2026-11-22T06:00:00.000Z",
+  "idempotencyKey": "optional-stable-per-sms-key"
 }
 ```
 
-The message may also be sent as `body` or `text`. For payment SMS the parser
-extracts amount, Trx ID, reference and sender number automatically.
+- `smsReceivedAt` is the phone's SMS arrival time. ISO-8601 with `Z`/offset is
+  preferred. MacroDroid's local `yyyy-MM-dd HH:mm:ss` is interpreted as
+  Asia/Dhaka (UTC+6).
+- `idempotencyKey` is optional; when omitted the server builds one from
+  `deviceId + sender + smsReceivedAt + message`.
+- `receivedAt` is still accepted for backward compatibility.
+- The message may also be sent as `body` or `text`. For payment SMS the parser
+  extracts amount, Trx ID, reference and sender number automatically.
 
-## 2. Signature calculation (recommended)
+## 2. OTP request window (5 minutes)
+
+- Starting a fresh Triangle login records `OtpWindow.requestedAt` before the
+  OTP request and sets `expiresAt = requestedAt + 5 minutes`.
+- An OTP SMS is accepted only when
+  `requestedAt <= smsReceivedAt < expiresAt`.
+- Old SMS (`OTP_TOO_EARLY`), expired SMS (`OTP_EXPIRED`), a second SMS while
+  verification is running (`OTP_ALREADY_CLAIMED`), a superseded request
+  (`OTP_SUPERSEDED`) and ambiguous codes (`OTP_AMBIGUOUS`) are stored as
+  `SmsInbound.status = rejected` and are **never** sent to Triangle.
+- If the phone clock differs from the server by more than 90 seconds, the
+  server receipt time is used instead of `smsReceivedAt`.
+- Duplicate forwarding is safe: the unique `idempotencyKey` returns the original
+  result with `duplicate: true`.
+- A rejected OTP does not consume the window; a new Refresh can request a new
+  OTP. An accepted OTP is consumed atomically before the session is saved.
+
+## 3. Signature calculation (recommended)
 
 ```
-bodyHash   = SHA256(sender + "|" + message + "|" + receivedAt)   (raw values as sent)
+bodyHash   = SHA256(sender + "|" + message + "|" + (smsReceivedAt ?? receivedAt ?? ""))
 signature  = HMAC_SHA256(secret, timestamp + "." + nonce + "." + bodyHash)   (hex)
 ```
 
@@ -42,7 +67,7 @@ The server rejects signatures whose timestamp is older than 5 minutes or whose
 nonce was already seen (409/401). Without a signature, only the shared secret
 header is checked.
 
-## 3. Setting up the phone (no custom app yet)
+## 4. Setting up the phone (no custom app yet)
 
 Use any Android SMS forwarder and point it at the endpoint:
 
@@ -68,7 +93,7 @@ Triangle specifics (confirmed with the ISP):
 - **Block rule:** messages containing a `pmt` marker (e.g. `pmt#123456`) are
   ignored completely — never processed as OTP or payment.
 
-## 4. Server-side OTP handling
+## 5. Server-side OTP handling
 
 - Incoming OTP SMS is stored as `SmsInbound` (kind `otp`) and as an
   `OtpRequest` (context `triangle_login`) with an **encrypted** code, SHA-256
@@ -78,7 +103,7 @@ Triangle specifics (confirmed with the ISP):
 - The Triangle login worker consumes the OTP once (single-use) and never
   re-logins unnecessarily (avoids panel lock).
 
-## 5. Security notes
+## 6. Security notes
 
 - Change `SMS_FORWARD_SECRET` before production.
 - Keep the endpoint HTTPS-only.

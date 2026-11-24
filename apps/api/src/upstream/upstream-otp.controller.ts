@@ -8,14 +8,18 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import type { AuthUser } from '../auth/types/auth-user';
-import { decryptString } from '../common/crypto';
+import { decryptString, encryptString } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { extractOtpCode } from '../webhooks/sms-parser.service';
 import { OtpStore } from './otp.store';
+import { OtpWindowService } from './otp-window.service';
+import { UpstreamSyncService } from './upstream-sync.service';
 
 const KEY = 'default';
 
@@ -24,10 +28,12 @@ export class UpstreamOtpController {
   constructor(
     private readonly store: OtpStore,
     private readonly prisma: PrismaService,
+    private readonly otpWindows: OtpWindowService,
+    private readonly upstreamSync: UpstreamSyncService,
   ) {}
 
   @Post('inbound')
-  inbound(
+  async inbound(
     @Headers('x-sms-secret') secret: string | undefined,
     @Body() body: { message?: string; otp?: string },
   ) {
@@ -37,11 +43,65 @@ export class UpstreamOtpController {
     }
 
     const source = body.otp ?? body.message ?? '';
-    const match = source.match(/\b(\d{6})\b/);
-    if (!match) throw new BadRequestException('No 6-digit OTP found in the message');
+    const extraction = extractOtpCode(source);
+    if (!extraction.code) {
+      throw new BadRequestException(
+        extraction.reason ?? 'No OTP found in the message',
+      );
+    }
 
-    this.store.set(KEY, match[1]);
-    return { accepted: true, receivedAt: new Date().toISOString() };
+    const tenant = await this.prisma.tenant.findFirst({
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!tenant) throw new BadRequestException('No tenant configured');
+
+    await this.otpWindows.recoverStale(tenant.id);
+    const window = await this.prisma.otpWindow.findFirst({
+      where: { tenantId: tenant.id, status: 'pending' },
+      orderBy: { requestedAt: 'desc' },
+    });
+    if (!window) {
+      throw new BadRequestException('No active OTP window — request a new OTP');
+    }
+
+    const now = Date.now();
+    if (now < window.requestedAt.getTime()) {
+      throw new BadRequestException('OTP arrived before the request window');
+    }
+    if (now >= window.expiresAt.getTime()) {
+      await this.otpWindows.expire(window.id, 'OTP_EXPIRED');
+      throw new BadRequestException('OTP window has expired');
+    }
+
+    const claimed = await this.otpWindows.claim(window.id);
+    if (!claimed) {
+      throw new BadRequestException('OTP window is already being verified');
+    }
+
+    await this.prisma.otpRequest.create({
+      data: {
+        tenantId: tenant.id,
+        context: 'triangle_login',
+        status: 'pending',
+        requestedAt: window.requestedAt,
+        expiresAt: window.expiresAt,
+        codeHash: createHash('sha256').update(extraction.code).digest('hex'),
+        codeEnc: encryptString(extraction.code),
+        otpWindowId: window.id,
+      },
+    });
+
+    this.store.set(KEY, extraction.code);
+    void this.upstreamSync
+      .completeLoginAndSync(tenant.id, window.id)
+      .catch(() => undefined);
+
+    return {
+      accepted: true,
+      receivedAt: new Date().toISOString(),
+      windowId: window.id,
+      expiresAt: window.expiresAt.toISOString(),
+    };
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)

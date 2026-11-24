@@ -212,6 +212,8 @@ const dictionary: Record<string, { bn: string; en: string }> = {
     bn: 'এখনো কোনো SMS আসেনি — MacroDroid চেক করুন',
     en: 'No SMS received yet — check MacroDroid',
   },
+  'sync.otpRemaining': { bn: 'বাকি সময়', en: 'Time left' },
+  'sync.otpExpired': { bn: 'OTP উইন্ডো শেষ', en: 'OTP window expired' },
   'sync.verifyingOtp': { bn: 'OTP যাচাই ও লগইন হচ্ছে…', en: 'Verifying OTP & Logging in…' },
   'sync.loginSuccess': { bn: 'লগইন সফল', en: 'Login Successful' },
   'sync.scraping': { bn: 'ডেটা সংগ্রহ হচ্ছে…', en: 'Scraping Data…' },

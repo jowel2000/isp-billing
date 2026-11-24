@@ -234,6 +234,15 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 - Error logs are retained for 90 days; the status endpoint is restricted to the three staff roles and the error endpoints to the Super Admin only.
 - A 403 "administratively locked" response sets `upstream_lock_until` for 24 hours, blocking new login attempts and showing the lock in the status bar.
 
+## OTP request window (5 minutes)
+
+- A fresh upstream login records `OtpWindow.requestedAt` **before** the Triangle OTP request and sets `expiresAt = requestedAt + 5 minutes`.
+- A newer Refresh/auto-send that actually requests a new OTP supersedes the old window. Reusing a still-fresh pending login does **not** extend the window.
+- An incoming OTP SMS is accepted only when `requestedAt <= smsReceivedAt < expiresAt`. Old, expired, superseded or ambiguous codes are stored in `SmsInbound` with `status = rejected` and a reason (`OTP_TOO_EARLY`, `OTP_EXPIRED`, `OTP_AMBIGUOUS`, `OTP_SUPERSEDED`, ...); they are never sent to Triangle.
+- The phone timestamp (`smsReceivedAt`) is used only when its clock is within 90 seconds of the server; otherwise the server receipt time is authoritative. MacroDroid's local `yyyy-MM-dd HH:mm:ss` is interpreted as Asia/Dhaka (UTC+6).
+- Duplicate forwarding is prevented by a unique `idempotencyKey` (device + sender + SMS time + body). `bodyHash` is **not** unique, so a re-sent OTP with the same text can still be accepted in a later window.
+- The top status bar shows the remaining window time (`Time left m:ss`). Ambiguous messages (for example an ID and an OTP in the same SMS) are rejected instead of guessed.
+
 ## SMS forwarding & automated OTP
 
 - See `docs/sms-forwarding-setup.md` for the phone → server setup (endpoint, HMAC signature, replay protection).
@@ -303,7 +312,7 @@ Header: x-sms-secret: <SMS_FORWARD_SECRET>
 Body: { "sender": "bKash", "message": "You have received Tk 250.00 from 01712345678. Trx ID ABC123XY. Ref 1000." }
 ```
 
-- The API classifies the SMS as `payment`, `otp` or `unknown` and stores raw text in `SmsInbound` (duplicate-protected by hash).
+- The API classifies the SMS as `payment`, `otp` or `unknown` and stores raw text in `SmsInbound` (duplicate-protected by a stable `idempotencyKey`).
 - Payment SMS is parsed for amount, Trx ID, reference and sender mobile.
 - A client is matched by the 4-digit payment code first, then by sender mobile number.
 - Matching payments are created with `channel=sms` and, when enabled, verified automatically (invoice + ledger + recharge job). Mismatches go to **Wrong Recharge** via a reconciliation issue.
@@ -322,7 +331,7 @@ Header: x-sms-secret: <SMS_FORWARD_SECRET>
 Body: { "message": "Your OTP is 123456" }
 ```
 
-The API extracts the 6-digit OTP and stores it in memory for the automation worker.
+The API extracts the OTP, checks it against the active 5-minute `OtpWindow`, and only then stores an encrypted `OtpRequest` and starts verification.
 The worker must still use a long-lived encrypted session; avoid re-login every few minutes because repeated logins trigger the upstream rate-limit lock.
 
 ## Security notes

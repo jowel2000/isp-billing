@@ -43,6 +43,7 @@ model Tenant {
   loginHistory        LoginHistory[]
   auditLogs           AuditLog[]
   otpRequests         OtpRequest[]
+  otpWindows          OtpWindow[]
   reconciliationIssues ReconciliationIssue[]
 }
 
@@ -426,15 +427,25 @@ model SmsInbound {
   senderMobile  String?
   otpCode       String?
   nonce         String?
-  status        String  @default("new") // new | verified | pending | unmatched | ignored | error
+  status        String  @default("new") // new | otp | rejected | verified | pending | unmatched | ignored | error
   paymentId     String?
   payment       Payment? @relation(fields: [paymentId], references: [id])
   error         String?
   receivedAt    DateTime?
   createdAt     DateTime @default(now())
 
-  @@unique([tenantId, bodyHash])
+  // OTP window linkage + phone timestamp metadata
+  otpWindowId      String?
+  otpWindow        OtpWindow? @relation(fields: [otpWindowId], references: [id], onDelete: SetNull)
+  smsReceivedAt    DateTime?
+  serverReceivedAt DateTime  @default(now())
+  clockSkewMs      Int?
+  idempotencyKey   String?
+  rejectionReason  String?
+
+  @@unique([tenantId, idempotencyKey])
   @@unique([tenantId, nonce])
+  @@index([tenantId, bodyHash])
   @@index([tenantId, kind, createdAt])
   @@index([tenantId, status, createdAt])
 }
@@ -667,6 +678,33 @@ model RefreshToken {
   @@index([userId, expiresAt])
 }
 
+model OtpWindow {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  deviceId    String?
+  sessionId   String?
+  trigger     String  @default("manual") // manual | auto
+  requestedBy String?
+  requestedAt DateTime @default(now())
+  expiresAt   DateTime
+  status      String  @default("pending")
+  // pending | verifying | consumed | expired | superseded | failed
+  attempts       Int       @default(0)
+  verifyingUntil DateTime?
+  consumedAt     DateTime?
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  sms SmsInbound[]
+
+  @@index([tenantId, status, requestedAt])
+  @@index([expiresAt])
+  @@index([tenantId, requestedAt])
+}
+
 model OtpRequest {
   id       String @id @default(cuid())
   tenantId String
@@ -679,6 +717,7 @@ model OtpRequest {
   context     String?
   codeHash    String?
   codeEnc     String?
+  otpWindowId String?
   respondedBy String?
   responder   User? @relation("OtpResponder", fields: [respondedBy], references: [id])
 

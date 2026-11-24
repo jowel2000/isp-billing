@@ -1712,6 +1712,21 @@ html[data-theme='dark'] .sync-status-progress {
   white-space: nowrap;
 }
 
+.sync-status-window {
+  padding: 2px 8px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #92400e;
+  font-size: 0.62rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+html[data-theme='dark'] .sync-status-window {
+  color: #fbbf24;
+}
+
 .sync-status-errors {
   display: inline-flex;
   align-items: center;
