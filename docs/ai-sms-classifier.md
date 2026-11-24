@@ -11,10 +11,10 @@ checked, and only then is the OTP passed to the Triangle login service.
 # Enable/disable AI (default: enabled when a key is present)
 AI_CLASSIFIER_ENABLED=true
 
-# gemini | openai | deepseek | none
+# gemini | openai | deepseek | opencode-go | opencode | none
 AI_PROVIDER=gemini
 
-# Provider key (or GEMINI_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY)
+# Provider key (or GEMINI_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY / OPENCODE_API_KEY)
 AI_API_KEY=...
 
 # Optional model override
@@ -29,10 +29,42 @@ AI_MIN_CONFIDENCE=0.65
 
 # Shown to the model as the expected upstream panel
 UPSTREAM_PANEL_NAME=Triangle
+
+# OpenCode only (Go requires the session header)
+AI_OPENCODE_SESSION=ses_isp_sms_classifier
+AI_USER_AGENT=JR-Communication-SMS-AI/1.0
 ```
 
 Without a key (or with `AI_CLASSIFIER_ENABLED=false`) the server uses only the
 deterministic parser and does not make any external AI request.
+
+### OpenCode Go / pay-as-you-go
+
+The classifier supports OpenCode's OpenAI-compatible gateway directly:
+
+```env
+AI_PROVIDER=opencode-go      # or "opencode" for pay-as-you-go
+AI_API_KEY=oc_sk_...         # Console personal API key
+AI_MODEL=<model id from /v1/models>
+AI_OPENCODE_SESSION=ses_isp_sms_classifier
+```
+
+| Plan | Base URL (built in) | Chat path |
+|---|---|---|
+| Go | `https://opencode.ai/inference/go` | `/openai/v1/chat/completions` |
+| Pay-as-you-go | `https://opencode.ai/inference` | `/openai/v1/chat/completions` |
+
+The service sends `x-opencode-session` (required by Go) and a dedicated
+User-Agent. List models with:
+
+```bash
+curl https://opencode.ai/inference/go/v1/models \
+  -H "Authorization: Bearer $AI_API_KEY"
+```
+
+Use the exact `data[].id` as `AI_MODEL`. `AI_BASE_URL` is not needed for
+OpenCode unless you use a proxy; if set, it must be the provider root without
+`/openai` or `/v1`.
 
 > Privacy: the raw SMS (which may contain an OTP) is sent to the configured AI
 > provider. Disable AI if that is not acceptable. OTPs are short-lived and the

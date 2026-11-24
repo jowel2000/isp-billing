@@ -256,7 +256,9 @@ export class SmsAiClassifierService {
           ? this.config.get<string>('OPENAI_API_KEY')
           : provider === 'deepseek'
             ? this.config.get<string>('DEEPSEEK_API_KEY')
-            : '') ||
+            : provider === 'opencode-go' || provider === 'opencode'
+              ? this.config.get<string>('OPENCODE_API_KEY')
+              : '') ||
       '';
 
     const explicitlyDisabled = ['false', '0', 'no', 'off'].includes(
@@ -264,6 +266,7 @@ export class SmsAiClassifierService {
         .trim()
         .toLowerCase(),
     );
+    const isOpenCode = provider === 'opencode-go' || provider === 'opencode';
     const enabled =
       !explicitlyDisabled &&
       provider !== 'none' &&
@@ -274,6 +277,10 @@ export class SmsAiClassifierService {
       gemini: 'gemini-2.0-flash',
       openai: 'gpt-4o-mini',
       deepseek: 'deepseek-chat',
+      // OpenCode Go model IDs are listed at
+      // https://opencode.ai/inference/go/v1/models — override with AI_MODEL.
+      'opencode-go': 'deepseek-v4.1-flash',
+      opencode: 'deepseek-v4.1-flash',
     };
 
     const model =
@@ -285,8 +292,20 @@ export class SmsAiClassifierService {
         ? 'https://generativelanguage.googleapis.com'
         : provider === 'deepseek'
           ? 'https://api.deepseek.com'
-          : 'https://api.openai.com')
+          : provider === 'opencode-go'
+            ? 'https://opencode.ai/inference/go'
+            : provider === 'opencode'
+              ? 'https://opencode.ai/inference'
+              : 'https://api.openai.com')
     ).replace(/\/+$/, '');
+
+    const opencodeSession =
+      this.config.get<string>('AI_OPENCODE_SESSION') ||
+      'ses_isp_sms_classifier';
+
+    const userAgent =
+      this.config.get<string>('AI_USER_AGENT') ||
+      'JR-Communication-SMS-AI/1.0';
 
     const timeoutMsRaw = Number(this.config.get<string>('AI_TIMEOUT_MS'));
     const timeoutMs =
@@ -312,6 +331,9 @@ export class SmsAiClassifierService {
       timeoutMs,
       minConfidence,
       panelName,
+      isOpenCode,
+      opencodeSession,
+      userAgent,
     };
   }
 
@@ -389,27 +411,53 @@ ${body}`;
     key: string,
     prompt: string,
     signal: AbortSignal,
+    options: {
+      opencode?: boolean;
+      session?: string;
+      userAgent?: string;
+    } = {},
   ): Promise<string> {
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    // OpenCode expects /openai/v1/chat/completions; other OpenAI-compatible
+    // providers use /v1/chat/completions.
+    const url = options.opencode
+      ? `${baseUrl}/openai/v1/chat/completions`
+      : `${baseUrl}/v1/chat/completions`;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+      'User-Agent':
+        options.userAgent || 'JR-Communication-SMS-AI/1.0',
+    };
+    if (options.opencode) {
+      headers['x-opencode-session'] =
+        options.session || 'ses_isp_sms_classifier';
+    }
+
+    const body: Record<string, unknown> = {
+      model,
+      temperature: 0,
+      max_tokens: 300,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict SMS classifier. Return only valid JSON matching the requested schema.',
+        },
+        { role: 'user', content: prompt },
+      ],
+    };
+
+    // OpenCode's gateway may translate models that do not support OpenAI's
+    // JSON mode, so rely on the strict prompt and local JSON extraction there.
+    if (!options.opencode) {
+      body.response_format = { type: 'json_object' };
+    }
+
+    const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        max_tokens: 300,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a strict SMS classifier. Return only valid JSON matching the requested schema.',
-          },
-          { role: 'user', content: prompt },
-        ],
-      }),
+      headers,
+      body: JSON.stringify(body),
       signal,
     });
 
@@ -455,6 +503,11 @@ ${body}`;
               settings.key,
               prompt,
               controller.signal,
+              {
+                opencode: settings.isOpenCode,
+                session: settings.opencodeSession,
+                userAgent: settings.userAgent,
+              },
             );
 
       const raw = extractJson(rawText);

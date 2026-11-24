@@ -245,7 +245,7 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 
 ## AI SMS classifier (optional)
 
-- The webhook can run an AI first pass (`AI_PROVIDER=gemini|openai|deepseek`)
+- The webhook can run an AI first pass (`AI_PROVIDER=gemini|openai|deepseek|opencode-go|opencode`)
   to classify `UPSTREAM_OTP`, `BKASH`, `NAGAD`, `ROCKET` or `OTHER` and extract
   only the OTP. See `docs/ai-sms-classifier.md` for the prompt, schema, env
   vars and failure handling.
