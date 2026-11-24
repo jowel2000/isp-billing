@@ -16,6 +16,12 @@ export class SmsWebhookDto {
   @MaxLength(4000)
   message?: string;
 
+  /** MacroDroid / generic forwarder alias. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
+  message_body?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(4000)
@@ -30,6 +36,12 @@ export class SmsWebhookDto {
   @IsString()
   @MaxLength(80)
   receivedAt?: string;
+
+  /** MacroDroid / generic forwarder alias. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  received_at?: string;
 
   /** Exact SMS arrival time from the phone (ISO-8601 or local yyyy-MM-dd HH:mm:ss). */
   @IsOptional()

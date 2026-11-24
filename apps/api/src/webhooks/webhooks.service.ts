@@ -15,6 +15,10 @@ import { UpstreamSyncService } from '../upstream/upstream-sync.service';
 import { PaymentsService } from '../payments/payments.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SmsWebhookDto } from './dto/sms-webhook.dto';
+import {
+  SmsAiClassification,
+  SmsAiClassifierService,
+} from './sms-ai-classifier.service';
 import { ParsedSms, SmsParserService } from './sms-parser.service';
 
 const CLOCK_SKEW_TOLERANCE_MS = 90_000;
@@ -82,6 +86,7 @@ export class WebhooksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly parser: SmsParserService,
+    private readonly aiClassifier: SmsAiClassifierService,
     private readonly otpStore: OtpStore,
     private readonly otpWindows: OtpWindowService,
     private readonly payments: PaymentsService,
@@ -119,12 +124,16 @@ export class WebhooksService {
     const tenant = await this.prisma.tenant.findFirst({ orderBy: { createdAt: 'asc' } });
     if (!tenant) return { accepted: false, reason: 'no_tenant' };
 
-    const body = String(dto.message ?? dto.body ?? dto.text ?? '').trim();
+    const body = String(
+      dto.message ?? dto.message_body ?? dto.body ?? dto.text ?? '',
+    ).trim();
     const sender = (dto.sender ?? dto.from)?.trim() || null;
     if (!body) return { accepted: false, reason: 'empty_message' };
 
     const serverReceivedAt = new Date();
-    const deviceReceivedAt = parseDeviceTimestamp(dto.smsReceivedAt ?? dto.receivedAt);
+    const deviceReceivedAt = parseDeviceTimestamp(
+      dto.smsReceivedAt ?? dto.received_at ?? dto.receivedAt,
+    );
     const { at: receivedAt, skewMs } = resolveReceivedAt(
       serverReceivedAt,
       deviceReceivedAt,
@@ -133,8 +142,9 @@ export class WebhooksService {
     // The signature contract hashes the RAW fields exactly as the phone sent
     // them (empty string when omitted), so the client can reproduce the hash.
     const rawSender = dto.sender ?? dto.from ?? '';
-    const rawBody = dto.message ?? dto.body ?? dto.text ?? '';
-    const rawReceivedAt = dto.smsReceivedAt ?? dto.receivedAt ?? '';
+    const rawBody = dto.message ?? dto.message_body ?? dto.body ?? dto.text ?? '';
+    const rawReceivedAt =
+      dto.smsReceivedAt ?? dto.received_at ?? dto.receivedAt ?? '';
     const bodyHash = sha256(`${rawSender}|${rawBody}|${rawReceivedAt}`);
     const idempotencyKey =
       dto.idempotencyKey?.trim() ||
@@ -194,7 +204,44 @@ export class WebhooksService {
     });
     const activeWindow = latestWindow?.status === 'pending' ? latestWindow : null;
 
-    const parsed = this.parser.parse(body, sender, Boolean(activeWindow));
+    // AI is an optional first pass. If it is disabled, times out, or returns
+    // an invalid/low-confidence OTP, the deterministic parser below still runs.
+    const ai = await this.aiClassifier.classify({ sender, body });
+    let parsed = this.parser.parse(body, sender, Boolean(activeWindow));
+
+    if (ai && !ai.error) {
+      if (ai.category === 'UPSTREAM_OTP' && ai.isOtp && ai.otp) {
+        parsed = {
+          ...parsed,
+          kind: 'otp',
+          provider: 'triangle',
+          otpCode: ai.otp,
+          otpLike: true,
+          otpReason: undefined,
+          otpCandidates: undefined,
+        };
+      } else if (
+        ai.category === 'BKASH' ||
+        ai.category === 'NAGAD' ||
+        ai.category === 'ROCKET'
+      ) {
+        const provider = ai.category.toLowerCase();
+        if (parsed.kind === 'otp') {
+          // An MFS OTP must never complete an upstream login.
+          parsed = {
+            ...parsed,
+            kind: 'unknown',
+            provider,
+            otpCode: null,
+            otpLike: false,
+            otpReason: undefined,
+            otpCandidates: undefined,
+          };
+        } else if (!parsed.provider) {
+          parsed = { ...parsed, provider };
+        }
+      }
+    }
 
     if (parsed.blocked) {
       const record = await this.storeSms({
@@ -218,7 +265,7 @@ export class WebhooksService {
         serverReceivedAt,
         clockSkewMs: Math.round(skewMs),
         otpWindowId: null,
-      });
+      }, ai);
       return {
         accepted: true,
         ignored: true,
@@ -240,6 +287,7 @@ export class WebhooksService {
         latestWindow,
         activeWindow,
         parsed,
+        ai,
       });
     }
 
@@ -263,7 +311,7 @@ export class WebhooksService {
       serverReceivedAt,
       clockSkewMs: Math.round(skewMs),
       otpWindowId: null,
-    });
+    }, ai);
 
     if (!record) {
       return { accepted: false, duplicate: true, reason: 'already-stored' };
@@ -300,6 +348,7 @@ export class WebhooksService {
         expiresAt: Date;
       } | null;
       parsed: ParsedSms;
+      ai: SmsAiClassification | null;
     },
   ) {
     const {
@@ -314,6 +363,7 @@ export class WebhooksService {
       latestWindow,
       activeWindow,
       parsed,
+      ai,
     } = ctx;
 
     const reject = async (reason: string, windowId?: string | null) => {
@@ -339,7 +389,7 @@ export class WebhooksService {
         serverReceivedAt,
         clockSkewMs: Math.round(skewMs),
         otpWindowId: windowId ?? null,
-      });
+      }, ai);
 
       if (!record) {
         const existing = await this.prisma.smsInbound.findUnique({
@@ -415,7 +465,7 @@ export class WebhooksService {
       serverReceivedAt,
       clockSkewMs: Math.round(skewMs),
       otpWindowId: activeWindow.id,
-    });
+    }, ai);
 
     if (!record) {
       const existing = await this.prisma.smsInbound.findUnique({
@@ -475,9 +525,25 @@ export class WebhooksService {
 
   private async storeSms(
     data: Prisma.SmsInboundUncheckedCreateInput,
+    ai: SmsAiClassification | null = null,
   ) {
+    const aiFields = ai
+      ? {
+          aiCategory: ai.error ? 'ERROR' : ai.category,
+          aiConfidence: ai.confidence,
+          aiProvider: ai.provider,
+          aiModel: ai.model,
+          aiReason: (ai.error
+            ? `AI error: ${ai.error}`
+            : ai.reason
+          ).slice(0, 500),
+        }
+      : {};
+
     try {
-      return await this.prisma.smsInbound.create({ data });
+      return await this.prisma.smsInbound.create({
+        data: { ...data, ...aiFields },
+      });
     } catch (error: any) {
       // Idempotency/nonce race: the other request already stored it.
       if (error?.code === 'P2002') return null;

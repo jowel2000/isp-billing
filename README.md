@@ -243,6 +243,20 @@ It prints only `otpRequired`, cookie count and response keys — never credentia
 - Duplicate forwarding is prevented by a unique `idempotencyKey` (device + sender + SMS time + body). `bodyHash` is **not** unique, so a re-sent OTP with the same text can still be accepted in a later window.
 - The top status bar shows the remaining window time (`Time left m:ss`). Ambiguous messages (for example an ID and an OTP in the same SMS) are rejected instead of guessed.
 
+## AI SMS classifier (optional)
+
+- The webhook can run an AI first pass (`AI_PROVIDER=gemini|openai|deepseek`)
+  to classify `UPSTREAM_OTP`, `BKASH`, `NAGAD`, `ROCKET` or `OTHER` and extract
+  only the OTP. See `docs/ai-sms-classifier.md` for the prompt, schema, env
+  vars and failure handling.
+- The AI is untrusted: the server verifies the OTP is 4–8 alphanumeric
+  characters, appears as a standalone token in the SMS, and meets
+  `AI_MIN_CONFIDENCE`. Otherwise the deterministic parser is used.
+- AI never bypasses the 5-minute `OtpWindow`, never logs in on its own, and a
+  bKash/Nagad/Rocket OTP can never complete an upstream login.
+- Without `AI_API_KEY` (or with `AI_CLASSIFIER_ENABLED=false`) the system works
+  exactly as before using only the deterministic parser.
+
 ## SMS forwarding & automated OTP
 
 - See `docs/sms-forwarding-setup.md` for the phone → server setup (endpoint, HMAC signature, replay protection).

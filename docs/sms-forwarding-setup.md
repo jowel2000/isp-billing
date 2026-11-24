@@ -33,11 +33,16 @@ Body (JSON):
 - `smsReceivedAt` is the phone's SMS arrival time. ISO-8601 with `Z`/offset is
   preferred. MacroDroid's local `yyyy-MM-dd HH:mm:ss` is interpreted as
   Asia/Dhaka (UTC+6).
+- `message_body` and `received_at` are accepted as aliases for `message` and
+  `smsReceivedAt` (for generic forwarders).
 - `idempotencyKey` is optional; when omitted the server builds one from
   `deviceId + sender + smsReceivedAt + message`.
 - `receivedAt` is still accepted for backward compatibility.
 - The message may also be sent as `body` or `text`. For payment SMS the parser
   extracts amount, Trx ID, reference and sender number automatically.
+- If AI classification is configured, it runs first; see
+  `docs/ai-sms-classifier.md`. Without an AI key the deterministic parser is
+  the only classifier.
 
 ## 2. OTP request window (5 minutes)
 

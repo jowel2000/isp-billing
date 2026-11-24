@@ -443,6 +443,13 @@ model SmsInbound {
   idempotencyKey   String?
   rejectionReason  String?
 
+  // AI classifier metadata (nullable when AI is disabled/unavailable)
+  aiCategory   String?
+  aiConfidence Float?
+  aiProvider   String?
+  aiModel      String?
+  aiReason     String?
+
   @@unique([tenantId, idempotencyKey])
   @@unique([tenantId, nonce])
   @@index([tenantId, bodyHash])
