@@ -506,11 +506,17 @@ export class WebhooksService {
 
     this.otpStore.set('default', parsed.otpCode);
 
-    void this.upstreamSync
-      .completeLoginAndSync(tenantId, activeWindow.id)
-      .catch((error) =>
-        this.logger.warn(`OTP login completion failed: ${error.message}`),
-      );
+    // In browser-login mode the Playwright worker polls the stored OTP and
+    // submits it inside a real browser. Calling the HTTP verifier here would
+    // compete for the same OTP and burn it, so skip it.
+    const loginMode = (process.env.TRIANGLE_LOGIN_MODE || 'http').toLowerCase();
+    if (loginMode !== 'browser') {
+      void this.upstreamSync
+        .completeLoginAndSync(tenantId, activeWindow.id)
+        .catch((error) =>
+          this.logger.warn(`OTP login completion failed: ${error.message}`),
+        );
+    }
 
     return {
       accepted: true,

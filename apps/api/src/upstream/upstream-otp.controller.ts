@@ -92,9 +92,13 @@ export class UpstreamOtpController {
     });
 
     this.store.set(KEY, extraction.code);
-    void this.upstreamSync
-      .completeLoginAndSync(tenant.id, window.id)
-      .catch(() => undefined);
+    // Browser-login mode: the Playwright worker reads the stored OTP itself.
+    const loginMode = (process.env.TRIANGLE_LOGIN_MODE || 'http').toLowerCase();
+    if (loginMode !== 'browser') {
+      void this.upstreamSync
+        .completeLoginAndSync(tenant.id, window.id)
+        .catch(() => undefined);
+    }
 
     return {
       accepted: true,

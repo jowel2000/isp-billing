@@ -11,8 +11,10 @@ import {
   TriangleApiError,
   TriangleClient,
   UpstreamBusinessError,
+  browserLogin,
 } from '@isp/adapter-triangle';
 import { decryptString, encryptString } from '../common/crypto';
+import { extractOtpCode } from '../webhooks/sms-parser.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SyncStatusService } from '../sync/sync-status.service';
 import { OtpWindowService } from './otp-window.service';
@@ -240,6 +242,149 @@ export class UpstreamSyncService implements OnModuleInit {
     );
   }
 
+  /** Session envelope built from browser-captured tokens. */
+  private sessionEnvelopeFromTokens(
+    accessToken: string,
+    refreshToken: string | null,
+    browserTokens: string | null,
+  ): string {
+    return encryptString(
+      JSON.stringify({
+        cookies: {},
+        challengeToken: null,
+        browserToken: browserTokens,
+        accessToken,
+        refreshToken,
+      }),
+    );
+  }
+
+  /** http (default) | browser | auto */
+  private loginMode(): 'http' | 'browser' | 'auto' {
+    const raw = (this.config.get<string>('TRIANGLE_LOGIN_MODE') || 'http').toLowerCase();
+    return raw === 'browser' || raw === 'auto' ? raw : 'http';
+  }
+
+  /**
+   * Playwright-based login. Used when the plain HTTP login/verify is rejected
+   * (the panel binds the OTP challenge to a real browser context).
+   *
+   * Flow:
+   *  1. reuse an active stored session if it still works
+   *  2. start an OTP window (so the SMS webhook accepts the OTP)
+   *  3. open a real Chromium, submit credentials
+   *  4. poll the DB for the forwarded OTP and type it in the browser
+   *  5. capture access_token + refreshToken from localStorage
+   */
+  private async ensureBrowserSession(
+    tenantId: string,
+    client: TriangleClient,
+    runId: string | null,
+    meta: { trigger: 'manual' | 'auto'; userId?: string },
+  ): Promise<'ok' | 'otp_required'> {
+    // 1. Reuse an active session when possible.
+    const active = await this.prisma.upstreamSession.findFirst({
+      where: { tenantId, status: 'active' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (active?.cookieEnc) {
+      try {
+        const envelope = this.parseSessionEnvelope(active.cookieEnc);
+        if (envelope.accessToken) {
+          client.restoreAuthTokens(envelope.accessToken, envelope.refreshToken);
+          client.restoreOtpChallenge(envelope.challengeToken, envelope.browserToken);
+          await client.getDashboard();
+          await this.prisma.upstreamSession.update({
+            where: { id: active.id },
+            data: { lastVerifiedAt: new Date() },
+          });
+          return 'ok';
+        }
+      } catch {
+        // expired — fall through to a fresh browser login
+      }
+    }
+
+    // 2. Open an OTP window so the SMS webhook stores the forwarded code.
+    const window = await this.otpWindows.start(tenantId, {
+      trigger: meta.trigger,
+      userId: meta.userId,
+    });
+    const startedAt = new Date();
+    await this.rememberLoginAttempt(tenantId);
+
+    if (runId) {
+      await this.syncStatus.step(runId, 'browser_login', 'Launching headless browser...', 12);
+    }
+
+    let result;
+    try {
+      result = await browserLogin({
+        baseUrl: this.credentials.baseUrl,
+        username: this.credentials.username,
+        password: this.credentials.password,
+        headless: this.config.get<string>('PLAYWRIGHT_HEADLESS') !== 'false',
+        timeoutMs: 180_000,
+        getOtp: () => this.waitForOtpFromDb(tenantId, startedAt),
+        onProgress: async (step, message) => {
+          if (!runId) return;
+          const mapped =
+            step === 'waiting_otp'
+              ? 'waiting_otp'
+              : step === 'verifying_otp'
+                ? 'verifying_otp'
+                : step === 'capturing_session'
+                  ? 'login_success'
+                  : 'browser_login';
+          await this.syncStatus.step(runId, mapped, message, 25).catch(() => undefined);
+        },
+      });
+    } catch (error) {
+      await this.otpWindows.fail(window.id, (error as Error).message).catch(() => undefined);
+      this.logger.warn(`Browser login failed: ${(error as Error).message}`);
+      return 'otp_required';
+    }
+
+    await this.otpWindows.supersede(tenantId, 'session_reused').catch(() => undefined);
+    await this.prisma.upstreamSession.create({
+      data: {
+        tenantId,
+        cookieEnc: this.sessionEnvelopeFromTokens(
+          result.accessToken,
+          result.refreshToken,
+          result.trustedBrowserTokens,
+        ),
+        status: 'active',
+        lastVerifiedAt: new Date(),
+      },
+    });
+    client.restoreAuthTokens(result.accessToken, result.refreshToken);
+    return 'ok';
+  }
+
+  /** Polls SmsInbound for a forwarded OTP that arrived after `since`. */
+  private async waitForOtpFromDb(tenantId: string, since: Date): Promise<string | null> {
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const sms = await this.prisma.smsInbound.findFirst({
+        where: {
+          tenantId,
+          kind: 'otp',
+          createdAt: { gte: since },
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { body: true, otpCode: true },
+      });
+      if (sms) {
+        if (sms.otpCode) return sms.otpCode;
+        const extracted = extractOtpCode(sms.body ?? '');
+        if (extracted.code) return extracted.code;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    return null;
+  }
+
   private async saveActiveSession(tenantId: string, client: TriangleClient) {
     await this.prisma.upstreamSession.create({
       data: {
@@ -453,12 +598,21 @@ export class UpstreamSyncService implements OnModuleInit {
       }
 
       const client = this.newClient();
+      const mode = this.loginMode();
 
-      await this.syncStatus.step(run.id, 'sending_otp', 'Sending OTP...', 10);
-      const state = await this.ensureSession(tenantId, client, run.id, {
-        trigger: meta.trigger ?? 'manual',
-        userId: meta.userId,
-      });
+      let state: 'ok' | 'otp_required' | 'cooldown';
+      if (mode === 'browser') {
+        state = await this.ensureBrowserSession(tenantId, client, run.id, {
+          trigger: meta.trigger ?? 'manual',
+          userId: meta.userId,
+        });
+      } else {
+        await this.syncStatus.step(run.id, 'sending_otp', 'Sending OTP...', 10);
+        state = await this.ensureSession(tenantId, client, run.id, {
+          trigger: meta.trigger ?? 'manual',
+          userId: meta.userId,
+        });
+      }
 
       if (state !== 'ok') {
         await this.syncStatus.step(

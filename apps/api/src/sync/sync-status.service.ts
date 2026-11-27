@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export type SyncStep =
   | 'queued'
   | 'sending_otp'
+  | 'browser_login'
   | 'waiting_otp'
   | 'verifying_otp'
   | 'login_success'
