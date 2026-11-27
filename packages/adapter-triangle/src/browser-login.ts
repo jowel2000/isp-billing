@@ -99,23 +99,64 @@ export async function browserLogin(options: BrowserLoginOptions): Promise<Browse
     await page.fill('#password', password);
 
     await progress('browser_login', 'Submitting credentials...');
-    await Promise.all([
-      page
-        .waitForResponse(
-          (res) => res.url().includes('/api/v1/login') && res.request().method() === 'POST',
-          { timeout: remaining(30_000) },
-        )
-        .catch(() => null),
-      page.click('button[type="submit"]'),
-    ]);
 
+    // Capture the login response for diagnostics (never log credentials).
+    let loginResponseSnippet = '';
+    const loginResponse = page
+      .waitForResponse(
+        (res) => res.url().includes('/api/v1/login') && res.request().method() === 'POST',
+        { timeout: remaining(30_000) },
+      )
+      .then(async (res) => {
+        try {
+          loginResponseSnippet = (await res.text()).slice(0, 200);
+        } catch {
+          // ignore body read failures
+        }
+        return res;
+      })
+      .catch(() => null);
+
+    await page.click('button[type="submit"]');
+    await loginResponse;
     await page.waitForLoadState('networkidle', { timeout: remaining(20_000) }).catch(() => undefined);
 
+    // The SPA navigates to /verify-otp/ asynchronously after the login API
+    // responds, so wait for either the OTP page or a token before deciding.
+    await Promise.race([
+      page
+        .waitForURL((url) => url.toString().includes('verify-otp'), {
+          timeout: remaining(20_000),
+        })
+        .catch(() => null),
+      page
+        .waitForFunction(
+          () => {
+            const ls = (globalThis as unknown as {
+              localStorage: { getItem(key: string): string | null };
+            }).localStorage;
+            return Boolean(ls.getItem('access_token') || ls.getItem('token'));
+          },
+          undefined,
+          { timeout: remaining(20_000) },
+        )
+        .catch(() => null),
+    ]);
+
     const otpInputs = page.locator('input[type="text"]');
-    const inputCount = await otpInputs.count();
+    let inputCount = 0;
+    try {
+      inputCount = await otpInputs.count();
+    } catch {
+      inputCount = 0;
+    }
     const onOtpPage = page.url().includes('verify-otp') || inputCount >= 6;
 
     if (onOtpPage) {
+      await otpInputs
+        .first()
+        .waitFor({ state: 'visible', timeout: remaining(15_000) })
+        .catch(() => undefined);
       await progress('waiting_otp', 'Waiting for OTP SMS...');
       const otp = await getOtp();
       if (!otp) throw new Error('OTP_NOT_RECEIVED');
@@ -166,7 +207,15 @@ export async function browserLogin(options: BrowserLoginOptions): Promise<Browse
     });
 
     if (!tokens.accessToken) {
-      throw new Error('LOGIN_SUCCEEDED_BUT_NO_TOKEN');
+      const pageText = await page
+        .locator('body')
+        .innerText()
+        .catch(() => '');
+      throw new Error(
+        `LOGIN_SUCCEEDED_BUT_NO_TOKEN | url=${page.url()} | loginResponse=${loginResponseSnippet} | page=${pageText
+          .replace(/\s+/g, ' ')
+          .slice(0, 160)}`,
+      );
     }
 
     return {
