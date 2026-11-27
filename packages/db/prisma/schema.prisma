@@ -186,6 +186,7 @@ model Client {
   publicId  String  @unique
   paymentCode String?
   upstreamId String?
+  upstreamUuid String?   // panel UUID — required for recharge API
   name      String
   mobile    String
   altMobile String?

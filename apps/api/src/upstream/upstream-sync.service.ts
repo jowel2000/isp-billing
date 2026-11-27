@@ -10,6 +10,7 @@ import {
   SessionExpiredError,
   TriangleApiError,
   TriangleClient,
+  UpstreamBusinessError,
 } from '@isp/adapter-triangle';
 import { decryptString, encryptString } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -587,6 +588,16 @@ export class UpstreamSyncService implements OnModuleInit {
       };
     }
 
+    if (error instanceof UpstreamBusinessError) {
+      return {
+        step: defaultStep,
+        code: 'UPSTREAM_BUSINESS_ERROR',
+        message: error.message,
+        detail: null,
+        httpStatus: 511,
+      };
+    }
+
     if ((error as { name?: string })?.name === 'AbortError') {
       return {
         step: defaultStep,
@@ -1076,6 +1087,8 @@ export class UpstreamSyncService implements OnModuleInit {
 
           for (const item of list) {
             const upstreamId = str(item.id ?? item.uid ?? item.client_id);
+            // Panel UUID is required by the recharge API (POST /clients/recharge/{uuid}).
+            const upstreamUuid = str(item.uuid) || null;
             const name =
               str(item.contact_name ?? item.PPPOE_username ?? item.name ?? item.username) ||
               'Unknown';
@@ -1136,6 +1149,7 @@ export class UpstreamSyncService implements OnModuleInit {
                   name,
                   ...(mobile ? { mobile } : {}),
                   upstreamId: upstreamId || existing.upstreamId,
+                  ...(upstreamUuid ? { upstreamUuid } : {}),
                   ...(pppoe ? { pppoeUsername: pppoe } : {}),
                   ...(ipAddress ? { ipAddress } : {}),
                   ...(area ? { areaId: area.id } : {}),
@@ -1177,6 +1191,7 @@ export class UpstreamSyncService implements OnModuleInit {
                   publicId: `TRG-SYNC-${Date.now()}-${Math.floor(Math.random() * 9999)}`,
                   paymentCode,
                   upstreamId: upstreamId || null,
+                  upstreamUuid,
                   name,
                   mobile: mobile || '01---------',
                   areaId: area?.id ?? null,
@@ -1272,6 +1287,120 @@ export class UpstreamSyncService implements OnModuleInit {
     return report;
   }
 
+  /**
+   * Processes queued recharge jobs by calling the verified panel endpoint:
+   *   POST /api/v1/clients/recharge/{uuid}  body: { days, comment }
+   * The panel calculates the amount itself — we only send the day count.
+   */
+  async processRechargeJobs(tenantId: string): Promise<{
+    processed: number;
+    succeeded: number;
+    failed: number;
+    errors: string[];
+  }> {
+    const result = { processed: 0, succeeded: 0, failed: 0, errors: [] as string[] };
+    const { username, password } = this.credentials;
+    if (!username || !password) {
+      result.errors.push('TRIANGLE credentials not configured');
+      return result;
+    }
+
+    const jobs = await this.prisma.rechargeJob.findMany({
+      where: { tenantId, status: 'queued' },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+      select: {
+        id: true,
+        clientId: true,
+        durationDays: true,
+        amount: true,
+        idempotencyKey: true,
+        client: { select: { upstreamUuid: true, upstreamId: true } },
+      },
+    });
+
+    if (!jobs.length) return result;
+
+    const client = this.newClient();
+    // Try to reuse a stored active session (avoids a fresh OTP when possible).
+    const active = await this.prisma.upstreamSession.findFirst({
+      where: { tenantId, status: 'active' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (active?.cookieEnc) {
+      const envelope = this.parseSessionEnvelope(active.cookieEnc);
+      client.restoreSession(envelope.cookies);
+      client.restoreOtpChallenge(envelope.challengeToken, envelope.browserToken);
+      client.restoreAuthTokens(envelope.accessToken, envelope.refreshToken);
+      client.restoreCredentials(username, password);
+      try {
+        await client.getDashboard();
+      } catch {
+        // Session unusable — will need OTP; jobs stay queued.
+        result.errors.push('SESSION_EXPIRED — refresh via OTP before recharge');
+        return result;
+      }
+    } else {
+      result.errors.push('NO_ACTIVE_SESSION — refresh via OTP before recharge');
+      return result;
+    }
+
+    for (const job of jobs) {
+      result.processed += 1;
+      const uuid = job.client?.upstreamUuid;
+      const days = job.durationDays;
+      if (!uuid || !days) {
+        await this.prisma.rechargeJob.update({
+          where: { id: job.id },
+          data: { status: 'failed', attempts: { increment: 1 }, lastError: 'Missing uuid or durationDays' },
+        });
+        result.failed += 1;
+        result.errors.push(`${job.id}: missing uuid/durationDays`);
+        continue;
+      }
+      try {
+        const response = (await client.recharge(uuid, days, `job:${job.idempotencyKey}`)) as
+          | { success?: boolean; message?: string }
+          | string;
+        const ok =
+          typeof response === 'object' && response !== null
+            ? response.success !== false
+            : true;
+        if (!ok) throw new Error((response as { message?: string })?.message ?? 'recharge rejected');
+
+        await this.prisma.rechargeJob.update({
+          where: { id: job.id },
+          data: {
+            status: 'completed',
+            attempts: { increment: 1 },
+            upstreamRef:
+              typeof response === 'object' && response !== null
+                ? String((response as { message?: string }).message ?? 'recharge completed')
+                : 'recharge completed',
+          },
+        });
+        result.succeeded += 1;
+      } catch (error) {
+        const message = (error as Error).message;
+        const transient =
+          error instanceof SessionExpiredError ||
+          (error as { name?: string })?.name === 'AbortError' ||
+          (!('status' in (error as object)) && !message.includes('insufficient'));
+        await this.prisma.rechargeJob.update({
+          where: { id: job.id },
+          data: {
+            status: transient ? 'queued' : 'failed',
+            attempts: { increment: 1 },
+            lastError: message,
+          },
+        });
+        result.failed += 1;
+        result.errors.push(`${job.id}: ${message}`);
+      }
+    }
+    return result;
+  }
+
   /** Records the last successful sync time for status display. */
   private async markUpdated(tenantId: string, report: SyncReport) {
     const now = new Date().toISOString();
@@ -1329,7 +1458,12 @@ export class UpstreamSyncService implements OnModuleInit {
       });
       for (const tenant of tenants) {
         try {
-          await this.sync(tenant.id, {}, { trigger: 'auto' });
+          const report = await this.sync(tenant.id, {}, { trigger: 'auto' });
+          if (report.status === 'completed') {
+            await this.processRechargeJobs(tenant.id).catch((error) =>
+              this.logger.warn(`Auto recharge failed for ${tenant.id}: ${(error as Error).message}`),
+            );
+          }
         } catch (error) {
           this.logger.warn(`Auto sync failed for ${tenant.id}: ${(error as Error).message}`);
         }
@@ -1394,6 +1528,20 @@ export class UpstreamSyncService implements OnModuleInit {
               this.logger.log(
                 `Scheduled sync ${time} for ${tenant.id}: ${report.status} (clients ${report.clients.fetched} fetched)`,
               );
+              // After a successful scrape, run any queued recharge jobs using
+              // the session we just established (OTP already handled above).
+              if (report.status === 'completed') {
+                try {
+                  const recharge = await this.processRechargeJobs(tenant.id);
+                  this.logger.log(
+                    `Scheduled recharge jobs for ${tenant.id}: ${recharge.succeeded}/${recharge.processed} succeeded`,
+                  );
+                } catch (error) {
+                  this.logger.warn(
+                    `Scheduled recharge failed for ${tenant.id}: ${(error as Error).message}`,
+                  );
+                }
+              }
             } catch (error) {
               this.logger.warn(`Scheduled sync failed for ${tenant.id}: ${(error as Error).message}`);
             }

@@ -7,6 +7,7 @@ import {
   SessionExpiredError,
   TriangleApiError,
   TriangleClientOptions,
+  UpstreamBusinessError,
 } from './types';
 
 const LOCK_HINTS = [
@@ -182,8 +183,51 @@ export class TriangleClient {
     return this.get(`/api/v1/clients/${encodeURIComponent(clientId)}/login-history`);
   }
 
-  async recharge(): Promise<never> {
-    throw new NotImplementedError('recharge');
+  /**
+   * POST /api/v1/clients/recharge/{uuid}
+   * Verified live (Nov 2026): body is exactly { days, comment }.
+   * The server calculates the deduction amount and new expiry — never send amount.
+   * Success: { success:true, code:'S01', payload:'Success fully recharge' }
+   * Business error (e.g. insufficient balance): HTTP 511 / code E01.
+   */
+  async recharge(uuid: string, days: number, comment = ''): Promise<unknown> {
+    const { data, status, text } = await this.request(
+      `/api/v1/clients/recharge/${encodeURIComponent(uuid)}`,
+      { method: 'POST', body: JSON.stringify({ days, comment }) },
+    );
+    return data ?? text ?? { status };
+  }
+
+  /** GET /api/v1/clients/recharge-info/{uuid} — balance + duration options. */
+  async getRechargeInfo(uuid: string): Promise<unknown> {
+    return this.get(`/api/v1/clients/recharge-info/${encodeURIComponent(uuid)}`);
+  }
+
+  /**
+   * GET /api/v1/clients/recharge-by-days/{uuid}/days/{n}
+   * Preview only — does NOT recharge. Optional start_date/end_date for custom ranges.
+   */
+  async getRechargeByDays(
+    uuid: string,
+    days: number,
+    start_date?: string,
+    end_date?: string,
+  ): Promise<unknown> {
+    const query: Record<string, string | number> = {};
+    if (start_date) query.start_date = start_date;
+    if (end_date) query.end_date = end_date;
+    return this.get(
+      `/api/v1/clients/recharge-by-days/${encodeURIComponent(uuid)}/days/${days}`,
+      query,
+    );
+  }
+
+  /** GET /api/v1/clients/recharge-history/{uuid}?page=&per_page= */
+  async getRechargeHistory(uuid: string, page = 1, perPage = 10): Promise<unknown> {
+    return this.get(`/api/v1/clients/recharge-history/${encodeURIComponent(uuid)}`, {
+      page,
+      per_page: perPage,
+    });
   }
 
   private buildOtpPayload(code: string): Record<string, unknown> {
@@ -325,6 +369,17 @@ export class TriangleClient {
 
       if (response.status === 429 || this.looksLocked(text)) {
         throw new PanelLockedError();
+      }
+
+      // HTTP 511 / code E01 = business error (e.g. insufficient balance on
+      // recharge, invalid OTP). Must not be retried blindly.
+      const bodyRecord = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
+      if (response.status === 511 || bodyRecord?.code === 'E01') {
+        const message =
+          (bodyRecord?.message as string) ??
+          ((bodyRecord?.payload as Record<string, unknown> | undefined)?.message as string) ??
+          'Upstream business error';
+        throw new UpstreamBusinessError(message);
       }
 
       // Expired access token: refresh once, then retry the request.

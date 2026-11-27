@@ -35,6 +35,17 @@ export class SessionExpiredError extends Error {
   }
 }
 
+/** HTTP 511 / code E01 — business error (insufficient balance, invalid OTP). Do not retry blindly. */
+export class UpstreamBusinessError extends Error {
+  constructor(
+    message: string,
+    public readonly code = 'E01',
+  ) {
+    super(message);
+    this.name = 'UpstreamBusinessError';
+  }
+}
+
 export class PanelLockedError extends Error {
   constructor(message = 'Upstream panel is rate-limited or locked') {
     super(message);
